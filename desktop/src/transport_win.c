@@ -77,7 +77,7 @@ static int endpoint(Net *n, const char *url, int allow, char *error, size_t size
     snprintf(n->url,sizeof(n->url),"%s",url); len=strlen(n->url); while(len&&n->url[len-1]=='/') n->url[--len]=0;
     ok=1; goto done;
 invalid:
-    snprintf(error,size,"Use a server URL like https://hermes.example.com:7777, without a path.");
+    snprintf(error,size,"Use your server URL (https://server:port), without a path.");
 done:
     free(w); return ok;
 }
@@ -223,7 +223,7 @@ static DWORD WINAPI worker(void *context) {
         if(!j) continue;
         if(j->kind==1) connect_job(n,j);
         else if(j->kind==2) { if(!n->socket || WinHttpWebSocketSend(n->socket,WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,j->wire,(DWORD)strlen(j->wire))) failure(n,"Message could not be sent. It was not retried."); }
-        else { NetMessage *m=message(NetRest); if(m) { m->tag=j->tag; m->context=j->context;
+        else { NetMessage *m=message(NetRest); if(m) { m->tag=j->tag; m->context=j->context; snprintf(m->url,sizeof(m->url),"%s",n->url);
             if(!n->connection) snprintf(m->error,sizeof(m->error),"Connect first.");
             else if(j->kind==4) upload(n,j,m);
             else m->json=http(n,j->path,NULL,0,NULL,m->error,sizeof(m->error)); deliver(n,m);
