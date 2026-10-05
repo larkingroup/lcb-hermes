@@ -24,6 +24,8 @@ final class Controller implements Gateway.Listener {
   final LinkedHashMap<String, JSONObject> requests = new LinkedHashMap<>();
   JSONObject data = obj("profiles", new JSONArray(), "theme", "light");
   JSONArray sessions = new JSONArray();
+  JSONArray attachments = new JSONArray();
+  int uploadsPending;
   Observer observer;
   Gateway gateway;
   String profileId = "",
@@ -124,10 +126,13 @@ final class Controller implements Gateway.Listener {
     stream = null;
     running = false;
     sessionId = "";
+    attachments = new JSONArray();
     JSONObject p = profile();
     if (p == null) return;
     storedId = p.optString("session");
     draft = p.optString("draft");
+    if (p.optJSONArray("draft_attachments") != null)
+      attachments = p.optJSONArray("draft_attachments");
     title = p.optString("title", "new chat");
     JSONArray a = p.optJSONArray("cache");
     if (a != null)
@@ -139,13 +144,19 @@ final class Controller implements Gateway.Listener {
     JSONObject p = profile();
     if (p != null) {
       try {
-        p.put("session", storedId).put("draft", draft).put("title", title);
+        p.put("session", storedId)
+            .put("draft", draft)
+            .put("title", title)
+            .put("draft_attachments", attachments);
         JSONArray cache = new JSONArray();
         for (int i = Math.max(0, rows.size() - 120); i < rows.size(); i++) {
           JSONObject row = rows.get(i);
           String t = Protocol.text(row);
           if (t.length() > 100000) t = t.substring(0, 100000);
-          cache.put(obj("role", row.optString("role"), "text", t));
+          JSONObject cached = obj("role", row.optString("role"), "text", t);
+          if (row.has("attachments")) cached.put("attachments", row.optJSONArray("attachments"));
+          if (row.has("display_text")) cached.put("display_text", row.optString("display_text"));
+          cache.put(cached);
         }
         p.put("cache", cache);
         if (gateway != null) p.put("cookies", gateway.savedCookies());
@@ -173,6 +184,30 @@ final class Controller implements Gateway.Listener {
     main.postDelayed(saveDraft, 500);
   }
 
+  void addAttachment(JSONObject value) {
+    if (attachments.length() >= 6) {
+      notice = "Send these attachments before adding more.";
+      changed(false);
+      return;
+    }
+    attachments.put(value);
+    notice = "";
+    save();
+    changed(true);
+  }
+
+  void removeAttachment(String id) {
+    if (submissionPending || running) return;
+    JSONArray keep = new JSONArray();
+    for (int i = 0; i < attachments.length(); i++) {
+      JSONObject a = attachments.optJSONObject(i);
+      if (a != null && !a.optString("id").equals(id)) keep.put(a);
+    }
+    attachments = keep;
+    save();
+    changed(true);
+  }
+
   private final Runnable saveDraft = this::save;
 
   void login(
@@ -182,7 +217,7 @@ final class Controller implements Gateway.Listener {
       String password,
       boolean http,
       Gateway.Result callback) {
-    if (running || submissionPending) {
+    if (running || submissionPending || uploadsPending > 0) {
       callback.done(null, "Let the current task finish before changing servers.");
       return;
     }
@@ -256,7 +291,9 @@ final class Controller implements Gateway.Listener {
               .put("session", old.optString("session"))
               .put("draft", old.optString("draft"))
               .put("title", old.optString("title", "new chat"))
-              .put("cache", old.optJSONArray("cache"));
+              .put("cache", old.optJSONArray("cache"))
+              .put("draft_attachments", old.optJSONArray("draft_attachments"))
+              .put("message_attachments", old.optJSONObject("message_attachments"));
         } catch (Exception ignored) {
         }
         break;
@@ -306,7 +343,7 @@ final class Controller implements Gateway.Listener {
   }
 
   void select(String id) {
-    if (running || submissionPending) {
+    if (running || submissionPending || uploadsPending > 0) {
       notice = "Let the current task finish before changing servers.";
       changed(false);
       return;
@@ -339,6 +376,7 @@ final class Controller implements Gateway.Listener {
     profileId = "";
     storedId = "";
     draft = "";
+    attachments = new JSONArray();
     rows.clear();
     tools.clear();
     requests.clear();
@@ -354,6 +392,7 @@ final class Controller implements Gateway.Listener {
     connecting = false;
     running = false;
     submissionPending = false;
+    uploadsPending = 0;
     status = "offline";
     context.stopService(new Intent(context, TurnService.class));
     reconnectScheduled = false;
@@ -421,7 +460,7 @@ final class Controller implements Gateway.Listener {
   }
 
   void newChat() {
-    if (running || submissionPending) {
+    if (running || submissionPending || uploadsPending > 0) {
       notice = "Finish or stop the current task first.";
       changed(false);
       return;
@@ -438,11 +477,17 @@ final class Controller implements Gateway.Listener {
     model = newModel;
     provider = newProvider;
     draft = "";
+    attachments = new JSONArray();
     save();
     changed(true);
   }
 
   void resume(String id) {
+    if (uploadsPending > 0) {
+      notice = "Wait for your attachment to finish loading.";
+      changed(false);
+      return;
+    }
     if (gateway == null || !gateway.online()) return;
     int generation = ++sessionGeneration;
     status = "loading chat";
@@ -479,6 +524,7 @@ final class Controller implements Gateway.Listener {
         if (row != null) rows.add(row);
       }
     updateInfo(v.optJSONObject("info"));
+    restoreMessageAttachments();
     running = v.optBoolean("running");
     JSONObject inflight = v.optJSONObject("inflight");
     if (inflight != null) {
@@ -497,7 +543,12 @@ final class Controller implements Gateway.Listener {
   }
 
   void submit(String text) {
-    if (text.trim().isEmpty() || submissionPending) return;
+    if ((text.trim().isEmpty() && attachments.length() == 0) || submissionPending) return;
+    if (uploadsPending > 0) {
+      notice = "Your attachment is still loading.";
+      changed(false);
+      return;
+    }
     if (status.equals("loading chat")) {
       notice = "Loading this chat. Your draft is saved.";
       changed(false);
@@ -536,15 +587,101 @@ final class Controller implements Gateway.Listener {
             }
             loadSession(v);
             save();
-            send(text);
+            attachAndSend(text, 0, new ArrayList<>());
           });
-    } else send(text);
+    } else attachAndSend(text, 0, new ArrayList<>());
+  }
+
+  private void attachAndSend(String text, int index, List<String> queued) {
+    if (gateway == null || !gateway.online()) {
+      submissionPending = false;
+      notice = "Reconnect before sending. Your attachments are saved.";
+      changed(false);
+      return;
+    }
+    if (index >= attachments.length()) {
+      send(text);
+      return;
+    }
+    JSONObject a = attachments.optJSONObject(index);
+    if (a == null || !a.optString("mime").startsWith("image/")) {
+      attachAndSend(text, index + 1, queued);
+      return;
+    }
+    Gateway source = gateway;
+    int generation = sessionGeneration;
+    source.rpc(
+        "image.attach",
+        obj("session_id", sessionId, "path", a.optString("path")),
+        (v, e) -> {
+          if (source != gateway || generation != sessionGeneration) return;
+          if (e != null) {
+            for (String path : queued)
+              source.rpc(
+                  "image.detach", obj("session_id", sessionId, "path", path), (r, error) -> {});
+            submissionPending = false;
+            notice = "Could not attach the image. " + e;
+            changed(false);
+            return;
+          }
+          queued.add(v.optString("path", a.optString("path")));
+          attachAndSend(text, index + 1, queued);
+        });
+  }
+
+  private void restoreMessageAttachments() {
+    JSONObject p = profile();
+    if (p == null) return;
+    JSONObject all = p.optJSONObject("message_attachments");
+    if (all == null) return;
+    JSONObject chat = all.optJSONObject(storedId);
+    if (chat == null) return;
+    int ordinal = 0;
+    for (JSONObject row : rows)
+      if (row.optString("role").equals("user")) {
+        JSONObject meta = chat.optJSONObject(String.valueOf(ordinal++));
+        if (meta != null)
+          try {
+            row.put("attachments", meta.optJSONArray("attachments"))
+                .put("display_text", meta.optString("display_text"));
+          } catch (Exception ignored) {
+          }
+      }
   }
 
   private void send(String text) {
+    String display = text;
+    String wire = text.trim().isEmpty() ? "Please look at the attachment." : text;
+    JSONArray sent = attachments;
+    for (int i = 0; i < sent.length(); i++) {
+      JSONObject a = sent.optJSONObject(i);
+      if (a != null && !a.optString("mime").startsWith("image/"))
+        wire += "\n\n[Attached file: " + a.optString("path") + "]";
+    }
+    int ordinal = 0;
+    for (JSONObject row : rows) if (row.optString("role").equals("user")) ordinal++;
+    JSONObject user =
+        obj("role", "user", "text", wire, "display_text", display, "attachments", sent);
+    JSONObject p = profile();
+    if (p != null && sent.length() > 0)
+      try {
+        JSONObject all = p.optJSONObject("message_attachments");
+        if (all == null) {
+          all = obj();
+          p.put("message_attachments", all);
+        }
+        JSONObject chat = all.optJSONObject(storedId);
+        if (chat == null) {
+          chat = obj();
+          all.put(storedId, chat);
+        }
+        chat.put(String.valueOf(ordinal), obj("display_text", display, "attachments", sent));
+      } catch (Exception ignored) {
+      }
+    attachments = new JSONArray();
     tools.clear();
     stream = null;
-    rows.add(obj("role", "user", "text", text));
+    rows.add(user);
     running = true;
     notice = "";
     taskService();
@@ -552,10 +689,11 @@ final class Controller implements Gateway.Listener {
     save();
     gateway.rpc(
         "prompt.submit",
-        obj("session_id", sessionId, "text", text, "surface", "android"),
+        obj("session_id", sessionId, "text", wire, "surface", "android"),
         (v, e) -> {
           submissionPending = false;
           if (e != null) {
+            // An ambiguous disconnect may already have sent the turn; never requeue images blindly.
             notice = e + " The prompt was not retried.";
             if (gateway != null && gateway.online()) {
               running = false;
@@ -748,7 +886,7 @@ final class Controller implements Gateway.Listener {
   String export() {
     StringBuilder s = new StringBuilder("# " + title + "\n\n");
     for (JSONObject row : rows) {
-      String role = row.optString("role"), t = Protocol.text(row);
+      String role = row.optString("role"), t = Attachments.displayText(row);
       if ((role.equals("user") || role.equals("assistant")) && !t.isEmpty())
         s.append("## ").append(role).append("\n\n").append(t).append("\n\n");
     }
@@ -781,6 +919,7 @@ final class Controller implements Gateway.Listener {
     sessionId = "";
     draft = "";
     demo = true;
+    attachments = new JSONArray();
     title = "a little help";
     model = "demo";
     provider = "offline";

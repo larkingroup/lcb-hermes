@@ -7,7 +7,8 @@ A small native Android client for Hermes. No ads. No purchases.
 Connect with the Hermes dashboard URL and dashboard login. Models stay on the server.
 Private HTTP needs the checkbox; the client can find the right protocol. No ports to add.
 
-Chat, sessions, files, tools, approvals, voice input, export. Light or dark.
+Chat, an inline session picker, image previews. Server controls live behind the computer icon.
+Tools, approvals, voice input, export. Light or dark.
 
 Build: `gradlew assembleDebug` with an Android SDK and JDK 17+.
 Windows setup: `python scripts/bootstrap-toolchain.py`, then `scripts/build.ps1`.
