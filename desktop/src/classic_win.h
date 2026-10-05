@@ -4,7 +4,7 @@
 #include <commctrl.h>
 
 enum { ClassicDocument, ClassicFolder, ClassicRun, ClassicStop,
-    ClassicEngine, ClassicModel, ClassicOutput, ClassicSettings, ClassicIconCount };
+    ClassicEngine, ClassicModel, ClassicOutput, ClassicSettings, ClassicAttach, ClassicIconCount };
 
 /* One small, DPI-scaled image list per application; no files or image codecs. */
 HIMAGELIST classic_icons(int dpi);

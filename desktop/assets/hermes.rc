@@ -1,5 +1,6 @@
 #include <windows.h>
 101 ICON "hermes.ico"
+102 RCDATA "nous-logo.png"
 1 RT_MANIFEST "hermes.manifest"
 1 VERSIONINFO
 FILEVERSION 0,4,0,0

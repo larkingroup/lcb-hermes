@@ -11,6 +11,20 @@ int jb(const cJSON *o, const char *key) { return cJSON_IsTrue(cJSON_GetObjectIte
 char *textdup(const char *s) { size_t n=strlen(s)+1; char *p=malloc(n); if(p) memcpy(p,s,n); return p; }
 static void field(char *dst, size_t cap, const char *s) { snprintf(dst,cap,"%s",s); }
 static cJSON *arraycopy(const cJSON *v) { return cJSON_IsArray(v)?cJSON_Duplicate(v,1):cJSON_CreateArray(); }
+static void activity(Chat *c, const char *text) {
+    if(!*text || !strcmp(c->activity,text)) return;
+    field(c->activity,sizeof(c->activity),text);
+    cJSON_AddItemToArray(c->activity_log,cJSON_CreateString(c->activity));
+    while(cJSON_GetArraySize(c->activity_log)>40) cJSON_DeleteItemFromArray(c->activity_log,0);
+}
+static void workspace(Chat *c, const cJSON *info) {
+    const cJSON *p=cJSON_GetObjectItemCaseSensitive(info,"project");
+    if(cJSON_HasObjectItem(info,"cwd")) field(c->cwd,sizeof(c->cwd),js(info,"cwd"));
+    if(cJSON_HasObjectItem(info,"project")) {
+        field(c->project_id,sizeof(c->project_id),js(p,"id"));
+        field(c->project_name,sizeof(c->project_name),js(p,"name"));
+    }
+}
 
 char *row_text(const cJSON *row) {
     const cJSON *v=cJSON_GetObjectItemCaseSensitive(row,"text"), *p;
@@ -28,9 +42,9 @@ Chat *chat_new(const char *key) {
     Chat *c=calloc(1,sizeof(*c)); if(!c) return NULL;
     field(c->key,sizeof(c->key),key); field(c->title,sizeof(c->title),"new chat");
     c->draft=textdup(""); c->messages=cJSON_CreateArray(); c->requests=cJSON_CreateArray(); c->attachments=cJSON_CreateArray(); c->media=cJSON_CreateObject(); c->stream=-1; c->sequence=-1;
-    return c;
+    c->activity_log=cJSON_CreateArray(); return c;
 }
-void chat_free(Chat *c) { if(!c) return; free(c->draft); cJSON_Delete(c->messages); cJSON_Delete(c->requests); cJSON_Delete(c->attachments); cJSON_Delete(c->media); free(c); }
+void chat_free(Chat *c) { if(!c) return; free(c->draft); cJSON_Delete(c->messages); cJSON_Delete(c->requests); cJSON_Delete(c->attachments); cJSON_Delete(c->media); cJSON_Delete(c->activity_log); free(c); }
 void chat_load(Chat *c, const cJSON *r) {
     const cJSON *info=cJSON_GetObjectItemCaseSensitive(r,"info"), *flight=cJSON_GetObjectItemCaseSensitive(r,"inflight");
     const char *stored=js(info,"stored_session_id");
@@ -39,10 +53,12 @@ void chat_load(Chat *c, const cJSON *r) {
     if(stored!=c->stored) field(c->stored,sizeof(c->stored),stored);
     if(*js(info,"title")) field(c->title,sizeof(c->title),js(info,"title"));
     field(c->model,sizeof(c->model),js(info,"model"));
+    workspace(c,info);
     cJSON_Delete(c->messages); c->messages=arraycopy(cJSON_GetObjectItemCaseSensitive(r,"messages"));
     { cJSON *row; int ordinal=0; cJSON_ArrayForEach(row,c->messages) if(!strcmp(js(row,"role"),"user")) { char key[40]; const cJSON *a; snprintf(key,sizeof(key),"%d",ordinal++); a=cJSON_GetObjectItemCaseSensitive(c->media,key); if(a) { cJSON_DeleteItemFromObjectCaseSensitive(row,"attachments"); cJSON_AddItemToObject(row,"attachments",cJSON_Duplicate(a,1)); } } }
     cJSON_Delete(c->requests); c->requests=arraycopy(cJSON_GetObjectItemCaseSensitive(r,"open_requests"));
     c->stream=-1; c->running=jb(r,"running") || jb(flight,"streaming"); c->pending=0; c->loaded=1;
+    activity(c,c->running?"Hermes is working":"Ready");
     if(*js(flight,"assistant")) {
         cJSON *m=cJSON_CreateObject(); cJSON_AddStringToObject(m,"role","assistant"); cJSON_AddStringToObject(m,"text",js(flight,"assistant"));
         c->stream=cJSON_GetArraySize(c->messages); cJSON_AddItemToArray(c->messages,m);
@@ -58,22 +74,39 @@ int chat_event(Chat *c, const cJSON *e) {
     const char *id=js(e,"session_id"), *type=js(e,"type"); const cJSON *p=cJSON_GetObjectItemCaseSensitive(e,"payload"), *seq=cJSON_GetObjectItemCaseSensitive(e,"seq");
     if(!*id || (strcmp(id,c->id)&&strcmp(id,c->stored))) return 0;
     if(cJSON_IsNumber(seq)) { if(seq->valuedouble<=c->sequence) return 0; c->sequence=seq->valuedouble; }
-    if(!strcmp(type,"message.start")) { c->running=1; c->stream=-1; }
+    if(!strcmp(type,"message.start")) { c->running=1; c->stream=-1; activity(c,"Working"); }
     else if(!strcmp(type,"message.delta")) {
         cJSON *m=stream(c); const char *old=js(m,"text"), *delta=js(p,"text"); size_t a=strlen(old), b=strlen(delta); char *joined;
         if(a+b>WIRE_LIMIT) return 0; joined=malloc(a+b+1); if(!joined) return 0;
         memcpy(joined,old,a); memcpy(joined+a,delta,b+1); cJSON_ReplaceItemInObjectCaseSensitive(m,"text",cJSON_CreateString(joined)); free(joined);
+        activity(c,"Responding");
     } else if(!strcmp(type,"message.complete")) {
         if(*js(p,"text")) { cJSON *m=stream(c); cJSON_ReplaceItemInObjectCaseSensitive(m,"text",cJSON_CreateString(js(p,"text"))); }
         c->running=0; c->pending=0; c->stream=-1;
+        activity(c,*js(p,"error")?js(p,"error"):!strcmp(js(p,"status"),"interrupted")?"Interrupted":"Complete");
     } else if(!strcmp(type,"session.info")) {
         if(*js(p,"title")) field(c->title,sizeof(c->title),js(p,"title"));
         if(*js(p,"model")) field(c->model,sizeof(c->model),js(p,"model"));
         if(*js(p,"stored_session_id")) field(c->stored,sizeof(c->stored),js(p,"stored_session_id"));
+        workspace(c,p);
     } else if(!strcmp(type,"session.title")) {
         if(*js(p,"title")) field(c->title,sizeof(c->title),js(p,"title"));
     } else if(!strcmp(type,"message.interim")) {
+        if(*js(p,"text") && !jb(p,"already_streamed")) {
+            cJSON *m=cJSON_CreateObject(); cJSON_AddStringToObject(m,"role","assistant"); cJSON_AddStringToObject(m,"text",js(p,"text")); cJSON_AddItemToArray(c->messages,m);
+        }
+        activity(c,"Working");
         c->stream=-1;
+    } else if(!strcmp(type,"thinking.delta") || !strcmp(type,"reasoning.delta") || !strcmp(type,"reasoning.available")) {
+        if(!c->running) return 0;
+        activity(c,"Thinking");
+    } else if(!strcmp(type,"status.update")) {
+        activity(c,*js(p,"text")?js(p,"text"):js(p,"kind"));
+    } else if(!strcmp(type,"tool.start") || !strcmp(type,"tool.complete") || !strcmp(type,"tool.generating")) {
+        char line[512];
+        if(!strcmp(type,"tool.complete") && *js(p,"summary")) field(line,sizeof(line),js(p,"summary"));
+        else snprintf(line,sizeof(line),"%s %.350s%s%.100s",!strcmp(type,"tool.complete")?"Finished":!strcmp(type,"tool.generating")?"Preparing":"Using",js(p,"name"),*js(p,"context")?": ":"",js(p,"context"));
+        activity(c,line);
     } else if(!strcmp(type,"request.cancel")) {
         int i; const cJSON *id=cJSON_GetObjectItemCaseSensitive(p,"id");
         for(i=cJSON_GetArraySize(c->requests)-1;i>=0;i--) if(cJSON_Compare(cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(c->requests,i),"id"),id,1)) cJSON_DeleteItemFromArray(c->requests,i);
@@ -82,11 +115,13 @@ int chat_event(Chat *c, const cJSON *e) {
 }
 cJSON *chat_json(const Chat *c) {
     cJSON *o=cJSON_CreateObject(); cJSON_AddStringToObject(o,"key",c->key); cJSON_AddStringToObject(o,"stored",c->stored); cJSON_AddStringToObject(o,"title",c->title);
+    cJSON_AddStringToObject(o,"cwd",c->cwd); cJSON_AddStringToObject(o,"project_id",c->project_id); cJSON_AddStringToObject(o,"project_name",c->project_name);
     cJSON_AddStringToObject(o,"draft",c->draft); cJSON_AddItemToObject(o,"attachments",cJSON_Duplicate(c->attachments,1)); cJSON_AddItemToObject(o,"media",cJSON_Duplicate(c->media,1)); return o;
 }
 Chat *chat_restore(const cJSON *v) {
     Chat *c=chat_new(js(v,"key")); if(!c) return NULL;
     field(c->stored,sizeof(c->stored),js(v,"stored")); field(c->title,sizeof(c->title),js(v,"title")); free(c->draft); c->draft=textdup(js(v,"draft"));
+    field(c->cwd,sizeof(c->cwd),js(v,"cwd")); field(c->project_id,sizeof(c->project_id),js(v,"project_id")); field(c->project_name,sizeof(c->project_name),js(v,"project_name"));
     cJSON_Delete(c->attachments); c->attachments=arraycopy(cJSON_GetObjectItemCaseSensitive(v,"attachments"));
     if(cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(v,"media"))) { cJSON_Delete(c->media); c->media=cJSON_Duplicate(cJSON_GetObjectItemCaseSensitive(v,"media"),1); } return c;
 }

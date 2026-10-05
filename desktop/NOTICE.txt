@@ -5,3 +5,9 @@ commit 9a52cf5. https://github.com/larkingroup/lcb-ai
 
 cJSON: Dave Gamble and contributors. MIT; see cJSON-LICENSE.txt.
 https://github.com/DaveGamble/cJSON
+
+Hermes Agent: Nous Research and the Hermes team.
+Nous Research logo reproduced from the Hermes Agent website assets, unmodified.
+Copyright (c) 2025 Nous Research. MIT; see NousResearch-LICENSE.txt.
+https://github.com/NousResearch/hermes-agent
+Logo source: https://github.com/NousResearch/hermes-agent/blob/main/website/static/img/nous-logo.png

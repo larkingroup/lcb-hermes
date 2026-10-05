@@ -22,5 +22,4 @@ Android 16 emulator. Hermes 0.21.5 on TrueNAS.
   server-menu return, image metadata after resume, deletion of its own test chat.
 - Android after folder move: unit tests, release lint, signed APK and AAB build passed.
 
-Run C suites with `ctest --test-dir desktop/build -C Release --output-on-failure`.
-Live tests take URL/username/password JSON through stdin; no credentials in tracked fixtures.
+Desktop checks are kept locally outside the tracked source.
