@@ -71,6 +71,184 @@ public class ClientTest {
     return null;
   }
 
+  private View described(View view, String name) {
+    if (name.contentEquals(
+        view.getContentDescription() == null ? "" : view.getContentDescription())) return view;
+    if (view instanceof ViewGroup)
+      for (int i = 0; i < ((ViewGroup) view).getChildCount(); i++) {
+        View found = described(((ViewGroup) view).getChildAt(i), name);
+        if (found != null) return found;
+      }
+    return null;
+  }
+
+  @Test
+  public void chatDesignAndImageAttachment() throws Exception {
+    Assume.assumeTrue("emulator only", Build.MODEL.contains("sdk"));
+    until(() -> c().loaded, 15);
+    File fixture = new File(activity.getActivity().getFilesDir(), "fixture.json");
+    Assume.assumeTrue("private test access required", fixture.exists());
+    JSONObject access =
+        new JSONObject(
+            new String(java.nio.file.Files.readAllBytes(fixture.toPath()), StandardCharsets.UTF_8));
+    assertTrue(fixture.delete());
+    ui(() -> c().forget());
+    assertTrue(device.wait(Until.hasObject(By.text("connect a server")), 5000));
+    device.findObject(By.text("connect a server")).click();
+    capture("design-connect-sheet");
+    device.pressBack();
+    CountDownLatch login = new CountDownLatch(1);
+    String[] failure = {null};
+    ui(
+        () ->
+            c().login(
+                    "Hermes",
+                    access.optString("url"),
+                    access.optString("username"),
+                    access.optString("password"),
+                    true,
+                    (v, e) -> {
+                      failure[0] = e;
+                      login.countDown();
+                    }));
+    assertTrue(login.await(30, TimeUnit.SECONDS));
+    assertNull(failure[0]);
+    until(() -> c().gateway != null && c().gateway.online(), 15);
+    assertNull("file explorer navigation removed", device.findObject(By.text("files")));
+    assertNotNull(device.findObject(By.desc("server and connection")));
+    device.findObject(By.desc("choose chat")).click();
+    assertTrue(device.wait(Until.hasObject(By.text("find a chat")), 3000));
+    capture("design-inline-sessions");
+    device.findObject(By.desc("choose chat")).click();
+    ui(
+        () -> {
+          View model = described(activity.getActivity().getWindow().getDecorView(), "choose model");
+          assertNotNull(model);
+          for (int i = 0; i < 3; i++) model.performClick();
+        });
+    assertTrue(device.wait(Until.hasObject(By.text("model for a new chat")), 10000));
+    capture("design-model-sheet");
+    device.pressBack();
+    assertTrue(device.wait(Until.gone(By.text("model for a new chat")), 3000));
+    ui(() -> c().newChat());
+    Bitmap image = Bitmap.createBitmap(320, 160, Bitmap.Config.ARGB_8888);
+    android.graphics.Canvas canvas = new android.graphics.Canvas(image);
+    android.graphics.Paint paint = new android.graphics.Paint();
+    paint.setColor(Color.RED);
+    canvas.drawRect(0, 0, 160, 160, paint);
+    paint.setColor(Color.BLUE);
+    canvas.drawRect(160, 0, 320, 160, paint);
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    image.compress(Bitmap.CompressFormat.PNG, 100, out);
+    File photo = new File(activity.getActivity().getCacheDir(), "orientation.jpg");
+    try (FileOutputStream file = new FileOutputStream(photo)) {
+      image.compress(Bitmap.CompressFormat.JPEG, 90, file);
+    }
+    android.media.ExifInterface exif = new android.media.ExifInterface(photo.toString());
+    exif.setAttribute(android.media.ExifInterface.TAG_ORIENTATION, "6");
+    exif.saveAttributes();
+    Bitmap oriented =
+        Attachments.bitmap(
+            obj(
+                "thumbnail",
+                Attachments.thumbnail(
+                    java.nio.file.Files.readAllBytes(photo.toPath()), "image/jpeg")));
+    assertNotNull(oriented);
+    assertEquals(160, oriented.getWidth());
+    assertEquals(320, oriented.getHeight());
+    oriented.recycle();
+    assertTrue(photo.delete());
+    image.recycle();
+    byte[] bytes = out.toByteArray();
+    String thumb = Attachments.thumbnail(bytes, "image/png");
+    assertFalse(thumb.isEmpty());
+    String target = "uploads/phone-image-" + java.util.UUID.randomUUID() + ".png";
+    CountDownLatch upload = new CountDownLatch(1);
+    String[] remote = {null};
+    ui(
+        () ->
+            c().gateway
+                .upload(
+                    target,
+                    "colours.png",
+                    bytes,
+                    (v, e) -> {
+                      failure[0] = e;
+                      if (v != null) remote[0] = v.optString("path");
+                      upload.countDown();
+                    }));
+    assertTrue(upload.await(30, TimeUnit.SECONDS));
+    assertNull(failure[0]);
+    JSONObject attachment =
+        obj(
+            "id",
+            "image-test",
+            "name",
+            "colours.png",
+            "mime",
+            "image/png",
+            "path",
+            remote[0],
+            "thumbnail",
+            thumb);
+    ui(
+        () -> {
+          c().addAttachment(attachment);
+          c().setDraft("What are the two colours in this image? Answer briefly. Do not use tools.");
+        });
+    assertTrue(device.wait(Until.hasObject(By.desc("attachment preview: colours.png")), 5000));
+    capture("design-image-draft");
+    device.setOrientationLeft();
+    Thread.sleep(700);
+    device.setOrientationNatural();
+    device.unfreezeRotation();
+    Thread.sleep(700);
+    assertEquals(1, c().attachments.length());
+    assertFalse(c().draft.contains(remote[0]));
+    // Remove and re-add without losing the draft or leaking a queued image to the server.
+    ui(() -> c().removeAttachment("image-test"));
+    assertEquals(0, c().attachments.length());
+    ui(() -> c().addAttachment(attachment));
+    ui(() -> c().submit(c().draft));
+    until(
+        () ->
+            !c().running
+                && !c().submissionPending
+                && c().rows.stream()
+                    .anyMatch(
+                        r ->
+                            r.optString("role").equals("assistant")
+                                && Protocol.text(r).toLowerCase().contains("red")
+                                && Protocol.text(r).toLowerCase().contains("blue")),
+        90);
+    assertEquals(0, c().attachments.length());
+    assertNotNull(device.findObject(By.desc("attached image: colours.png")));
+    assertFalse(
+        "image must not be submitted as path prose",
+        Protocol.text(c().rows.get(0)).contains("Attached file"));
+    String stored = c().storedId;
+    ui(() -> c().newChat());
+    ui(() -> c().resume(stored));
+    until(
+        () ->
+            c().status.equals("connected")
+                && c().rows.stream()
+                    .anyMatch(
+                        r ->
+                            r.optJSONArray("attachments") != null
+                                && r.optJSONArray("attachments").length() == 1),
+        20);
+    assertNotNull(device.findObject(By.desc("attached image: colours.png")));
+    capture("design-chat-light");
+    ui(() -> c().theme("dark"));
+    capture("design-chat-dark");
+    ui(() -> c().theme("light"));
+    device.findObject(By.desc("server and connection")).click();
+    assertNotNull(device.findObject(By.text("open dashboard")));
+    capture("design-server");
+    device.findObject(By.desc("back to chat")).click();
+  }
+
   @Test
   public void phoneFixes() throws Exception {
     Assume.assumeTrue("emulator only", Build.MODEL.contains("sdk"));
@@ -118,7 +296,7 @@ public class ClientTest {
     until(() -> c().gateway != null && c().gateway.online(), 15);
     ui(
         () -> {
-          Button model = button(activity.getActivity().getWindow().getDecorView(), "model");
+          View model = described(activity.getActivity().getWindow().getDecorView(), "choose model");
           assertNotNull(model);
           for (int i = 0; i < 3; i++) model.performClick();
         });
@@ -430,10 +608,10 @@ public class ClientTest {
       }
     assertTrue(found);
     ui(() -> c().setDraft(""));
-    device.findObject(By.text("server")).click();
+    device.findObject(By.desc("server and connection")).click();
     Thread.sleep(1200);
     capture("phone-server");
-    device.findObject(By.text("chat")).click();
+    device.findObject(By.desc("back to chat")).click();
   }
 
   @Test

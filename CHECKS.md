@@ -8,4 +8,5 @@ Android 16 emulator. Hermes 0.21.5 on TrueNAS.
 - Light, dark, landscape. Ten connection/parser unit checks. Release lint: no errors.
 - 0.1.2: wrong HTTPS recovered on a private server; one model picker after three taps.
 - Screenshots allowed. Real reply notification delivered in background and opened chat.
-- Signed APK and AAB verified. Fold installed via USB. Play review pending.
+- 0.2.0: inline sessions and native sheets; photo orientation, previews, real image reply, chat reopen.
+- Signed APK and AAB verified. Fold installed via USB.

@@ -25,20 +25,21 @@ import org.json.*;
 
 public final class MainActivity extends Activity implements Controller.Observer {
   Controller c;
-  private LinearLayout root, content, transcript, toolsPanel;
-  private TextView connection, heading, modelLabel, notice;
+  private LinearLayout root, content, transcript, toolsPanel, sessionPane, attachmentTray;
+  private TextView connection, modelLabel, notice, serverStatus;
   private EditText composer;
   private Button send, approval;
   private ScrollView chatScroll;
   private final Map<JSONObject, TextView> messageViews = new IdentityHashMap<>();
-  private final ArrayList<Button> tabs = new ArrayList<>();
+  private boolean sessionsExpanded;
+  private Button sessionPicker;
   private Markwon markdown;
-  private int face, paper, light, shadow, ink, muted, blue, blueInk, accent, accentInk;
-  private String page = "chat", theme = "", filesPath = "", parentPath = "";
-  private boolean syncingDraft, filesLoaded, needsScroll = true, dialogOpen;
+  private int face, paper, shadow, ink, muted, blue, blueInk, accent, accentInk;
+  private String page = "chat", theme = "";
+  private boolean syncingDraft, needsScroll = true, dialogOpen;
   private boolean followTail = true;
   private boolean modelPickerPending;
-  private AlertDialog modelDialog;
+  private Sheet modelDialog;
   private byte[] pendingExport;
   private static final int PICK_FILE = 2, SAVE_FILE = 3, VOICE = 4;
 
@@ -46,7 +47,10 @@ public final class MainActivity extends Activity implements Controller.Observer 
   public void onCreate(Bundle saved) {
     super.onCreate(saved);
     c = ((HermesApp) getApplication()).controller;
-    if (saved != null) page = saved.getString("page", "chat");
+    if (saved != null) {
+      page = saved.getString("page", "chat");
+      sessionsExpanded = saved.getBoolean("sessions", false);
+    }
     markdown =
         Markwon.builder(this)
             .usePlugin(TablePlugin.create(this))
@@ -66,6 +70,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
   protected void onSaveInstanceState(Bundle b) {
     super.onSaveInstanceState(b);
     b.putString("page", page);
+    b.putBoolean("sessions", sessionsExpanded);
   }
 
   @Override
@@ -107,22 +112,21 @@ public final class MainActivity extends Activity implements Controller.Observer 
   }
 
   private int gutter() {
-    return dp(8 + Math.max(0, (getResources().getConfiguration().screenWidthDp - 720) / 2f));
+    return dp(12 + Math.max(0, (getResources().getConfiguration().screenWidthDp - 820) / 2f));
   }
 
   private void colors() {
     theme = c.data.optString("theme", "light");
     boolean dark = theme.equals("dark");
-    face = color(dark ? "#303a42" : "#dedbc9");
-    paper = color(dark ? "#141c23" : "#fffef8");
-    light = color(dark ? "#73838e" : "#ffffff");
-    shadow = color(dark ? "#090e13" : "#697780");
+    face = color(dark ? "#1e272e" : "#f0efe7");
+    paper = color(dark ? "#182128" : "#fffefb");
+    shadow = color(dark ? "#38464f" : "#b8c2c4");
     ink = color(dark ? "#f0f2ed" : "#202e38");
     muted = color(dark ? "#b8c5ce" : "#50616e");
     blue = color(dark ? "#354e62" : "#c8ddec");
     blueInk = color(dark ? "#ecf4fa" : "#203e55");
     accent = color(dark ? "#456c88" : "#315870");
-    accentInk = color("#fffef8");
+    accentInk = color("#fffefb");
   }
 
   private LinearLayout column() {
@@ -150,12 +154,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
 
   private TextView label(String value) {
     TextView v = text(value, 12, muted);
-    v.setTypeface(Typeface.MONOSPACE);
     return v;
-  }
-
-  private Drawable bevel(int color, boolean inset) {
-    return new Bevel(color, light, shadow, inset, dp(1));
   }
 
   private Button button(String value, Runnable click) {
@@ -177,8 +176,8 @@ public final class MainActivity extends Activity implements Controller.Observer 
   private void buttonColors(Button b, int fill, int textColor) {
     b.setTextColor(textColor);
     StateListDrawable bg = new StateListDrawable();
-    bg.addState(new int[] {android.R.attr.state_pressed}, bevel(fill, true));
-    bg.addState(new int[] {}, bevel(fill, false));
+    bg.addState(new int[] {android.R.attr.state_pressed}, surface(blue, 8, true));
+    bg.addState(new int[] {}, surface(fill, 8, true));
     b.setBackground(bg);
   }
 
@@ -231,95 +230,111 @@ public final class MainActivity extends Activity implements Controller.Observer 
               WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
                   | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
     LinearLayout bar = row();
-    bar.setBackground(bevel(accent, false));
-    bar.setPadding(dp(5), dp(4), dp(4), dp(4));
+    bar.setPadding(0, dp(8), 0, dp(8));
     ImageView logo = new ImageView(this);
     logo.setImageResource(R.drawable.lcb_logo);
-    logo.setBackgroundColor(color("#faf9f1"));
-    logo.setPadding(dp(2), dp(2), dp(2), dp(2));
     logo.setContentDescription("LCB");
-    bar.addView(logo, new LinearLayout.LayoutParams(dp(32), dp(32)));
-    LinearLayout names = compact() ? row() : column();
-    TextView app = text("lcb-hermes", 17, accentInk);
+    logo.setBackground(surface(color("#faf9f1"), 4, false));
+    logo.setClipToOutline(true);
+    bar.addView(logo, new LinearLayout.LayoutParams(dp(24), dp(24)));
+    TextView app = text("lcb-hermes", 16, ink);
     app.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-    names.addView(app);
+    weighted(bar, app);
     connection = label("offline");
-    connection.setTextColor(accentInk);
     connection.setSingleLine(true);
+    connection.setMaxWidth(dp(140));
     connection.setEllipsize(TextUtils.TruncateAt.END);
-    names.addView(connection);
-    bar.addView(names, new LinearLayout.LayoutParams(0, -2, 1));
-    Button menu = button("···", this::menu);
-    menu.setContentDescription("settings and connection");
-    bar.addView(menu);
+    if (!compact()) bar.addView(connection);
+    bar.addView(
+        iconButton(
+            "server",
+            "server and connection",
+            () -> show(page.equals("server") ? "chat" : "server")));
     add(root, bar);
     content = column();
     root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
-    LinearLayout tabbar = row();
-    tabs.clear();
-    for (String name : new String[] {"chat", "sessions", "files", "server"}) {
-      Button b = button(name, () -> show(name));
-      tabs.add(b);
-      weighted(tabbar, b);
-    }
-    add(root, tabbar);
-    gap(root, 4);
     show(page);
   }
 
+  private Drawable surface(int fill, int radius, boolean border) {
+    GradientDrawable d = new GradientDrawable();
+    d.setColor(fill);
+    d.setCornerRadius(dp(radius));
+    if (border) d.setStroke(dp(1), shadow);
+    return d;
+  }
+
+  private Button iconButton(String glyph, String description, Runnable click) {
+    Button b = button("", click);
+    b.setContentDescription(description);
+    b.setPadding(dp(11), dp(11), dp(11), dp(11));
+    Glyph icon = new Glyph(glyph, ink);
+    icon.setBounds(0, 0, dp(20), dp(20));
+    b.setCompoundDrawables(icon, null, null, null);
+    b.setBackground(
+        new RippleDrawable(
+            android.content.res.ColorStateList.valueOf(blue),
+            surface(Color.TRANSPARENT, 8, false),
+            null));
+    return b;
+  }
+
   private void show(String name) {
-    page = name;
+    if (name.equals("sessions")) {
+      sessionsExpanded = true;
+      name = "chat";
+    }
+    page = name.equals("server") ? "server" : "chat";
     content.removeAllViews();
     composer = null;
     messageViews.clear();
     notice = null;
-    for (Button b : tabs) {
-      boolean active = b.getText().toString().equals(name);
-      buttonColors(b, active ? accent : face, active ? accentInk : ink);
-    }
-    switch (name) {
-      case "sessions":
-        sessions();
-        break;
-      case "files":
-        files();
-        break;
-      case "server":
-        server();
-        break;
-      default:
-        chat();
-    }
+    sessionPane = null;
+    attachmentTray = null;
+    serverStatus = null;
+    if (page.equals("server")) server();
+    else chat();
     update(false);
   }
 
   private void chat() {
     LinearLayout top = row();
-    top.setBackground(bevel(accent, false));
-    heading = text(c.title, 14, accentInk);
-    heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-    heading.setSingleLine(true);
-    heading.setEllipsize(TextUtils.TruncateAt.END);
-    weighted(top, heading);
+    sessionPicker = button(c.title + "  ⌄", this::toggleSessions);
+    sessionPicker.setTextSize(16);
+    sessionPicker.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+    sessionPicker.setSingleLine(true);
+    sessionPicker.setEllipsize(TextUtils.TruncateAt.END);
+    sessionPicker.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+    sessionPicker.setPadding(dp(4), 0, dp(8), 0);
+    sessionPicker.setBackground(
+        new RippleDrawable(
+            android.content.res.ColorStateList.valueOf(blue),
+            surface(Color.TRANSPARENT, 6, false),
+            null));
+    sessionPicker.setContentDescription("choose chat");
+    weighted(top, sessionPicker);
     Button fresh =
         button(
-            "+",
+            "new chat",
             () -> {
               c.newChat();
               needsScroll = true;
+              sessionsExpanded = false;
+              show("chat");
             });
     fresh.setContentDescription("new chat");
+    fresh.setTextColor(theme.equals("dark") ? blueInk : accent);
+    fresh.setBackground(surface(paper, 8, true));
     top.addView(fresh);
     add(content, top);
-    LinearLayout info = row();
-    modelLabel = label(c.model.isEmpty() ? "server default" : c.model);
-    weighted(info, modelLabel);
-    Button choose = button("model", this::models);
-    if (compact()) top.addView(choose);
-    else {
-      info.addView(choose);
-      add(content, info);
-    }
+    sessionPane = column();
+    add(content, sessionPane);
+    if (sessionsExpanded) renderSessionPicker();
+    modelLabel = label((c.model.isEmpty() ? "server default" : c.model) + "  ⌄");
+    modelLabel.setOnClickListener(v -> models());
+    modelLabel.setContentDescription("choose model");
+    modelLabel.setPadding(dp(4), dp(4), dp(8), dp(7));
+    add(content, modelLabel);
     chatScroll = new ScrollView(this);
     chatScroll.setOnScrollChangeListener(
         (view, x, y, oldX, oldY) -> {
@@ -328,9 +343,8 @@ public final class MainActivity extends Activity implements Controller.Observer 
                 chatScroll.getChildAt(0).getHeight() - chatScroll.getHeight() - y < dp(100);
         });
     chatScroll.setFillViewport(true);
-    chatScroll.setBackground(bevel(paper, true));
     transcript = column();
-    transcript.setPadding(dp(6), dp(6), dp(6), dp(6));
+    transcript.setPadding(0, dp(10), 0, dp(12));
     chatScroll.addView(transcript);
     content.addView(chatScroll, new LinearLayout.LayoutParams(-1, 0, 1));
     notice = label("");
@@ -339,19 +353,23 @@ public final class MainActivity extends Activity implements Controller.Observer 
     add(content, approval);
     LinearLayout composeBox = column();
     composeBox.setPadding(dp(6), dp(6), dp(6), dp(6));
-    composeBox.setBackground(bevel(face, false));
+    composeBox.setBackground(surface(paper, 12, true));
+    attachmentTray = column();
+    add(composeBox, attachmentTray);
+    renderAttachmentTray();
+    LinearLayout input = row();
+    input.addView(iconButton("attach", "attach photo or file", this::pickFile));
     composer = new EditText(this);
     composer.setTextColor(ink);
     composer.setHintTextColor(muted);
     composer.setHint("message Hermes…");
-    composer.setTextSize(14);
-    composer.setGravity(Gravity.TOP);
+    composer.setTextSize(15);
+    composer.setGravity(Gravity.CENTER_VERTICAL);
     composer.setMinLines(1);
-    composer.setMinimumHeight(dp(40));
     composer.setMaxLines(compact() ? 3 : 5);
     composer.setFilters(new InputFilter[] {new InputFilter.LengthFilter(100000)});
-    composer.setPadding(dp(8), dp(6), dp(8), dp(6));
-    composer.setBackground(bevel(paper, true));
+    composer.setPadding(dp(4), dp(10), dp(4), dp(10));
+    composer.setBackgroundColor(Color.TRANSPARENT);
     composer.setInputType(
         android.text.InputType.TYPE_CLASS_TEXT
             | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
@@ -369,15 +387,12 @@ public final class MainActivity extends Activity implements Controller.Observer 
 
           public void afterTextChanged(Editable e) {}
         });
-    add(composeBox, composer);
-    LinearLayout actions = row();
-    actions.addView(button("attach", () -> pickFile(true)));
-    actions.addView(button("voice", this::voice));
-    View spacer = new View(this);
-    actions.addView(spacer, new LinearLayout.LayoutParams(0, 1, 1));
+    weighted(input, composer);
+    input.addView(iconButton("voice", "voice input", this::voice));
     send =
-        button(
+        iconButton(
             c.running ? "stop" : "send",
+            c.running ? "stop Hermes" : "send message",
             () -> {
               if (c.running) c.stop();
               else {
@@ -386,12 +401,109 @@ public final class MainActivity extends Activity implements Controller.Observer 
                 c.submit(composer.getText().toString());
               }
             });
-    actions.addView(send);
-    buttonColors(send, accent, accentInk);
-    add(composeBox, actions);
+    send.setBackground(surface(accent, 9, false));
+    input.addView(send);
+    add(composeBox, input);
     add(content, composeBox);
-    gap(content, 6);
+    gap(content, 8);
     renderTranscript();
+  }
+
+  private void toggleSessions() {
+    sessionsExpanded = !sessionsExpanded;
+    if (sessionsExpanded) renderSessionPicker();
+    else if (sessionPane != null) sessionPane.removeAllViews();
+  }
+
+  private void renderSessionPicker() {
+    if (sessionPane == null) return;
+    sessionPane.removeAllViews();
+    LinearLayout pane = column();
+    pane.setPadding(dp(10), dp(8), dp(10), dp(8));
+    pane.setBackground(surface(paper, 10, true));
+    add(sessionPane, pane);
+    EditText search = new EditText(this);
+    search.setTextSize(14);
+    search.setTextColor(ink);
+    search.setHintTextColor(muted);
+    search.setHint("find a chat");
+    search.setSingleLine();
+    search.setBackgroundColor(Color.TRANSPARENT);
+    search.setPadding(dp(4), dp(4), dp(4), dp(8));
+    add(pane, search);
+    ScrollView scroll = new ScrollView(this);
+    LinearLayout list = column();
+    scroll.addView(list);
+    pane.addView(scroll, new LinearLayout.LayoutParams(-1, dp(compact() ? 130 : 230)));
+    Runnable render =
+        () -> {
+          list.removeAllViews();
+          JSONArray all = c.sessions;
+          int count = 0;
+          String query = search.getText().toString().toLowerCase(Locale.ROOT);
+          if (all != null)
+            for (int i = 0; i < all.length(); i++) {
+              JSONObject session = all.optJSONObject(i);
+              if (session == null) continue;
+              String title = session.optString("title", "untitled"),
+                  preview = session.optString("preview");
+              if (!(title + preview).toLowerCase(Locale.ROOT).contains(query)) continue;
+              LinearLayout item = column();
+              item.setPadding(dp(6), dp(7), dp(6), dp(7));
+              String id = session.optString("id");
+              item.setBackground(surface(id.equals(c.storedId) ? blue : paper, 6, false));
+              TextView name = text(title, 15, ink);
+              name.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+              name.setSingleLine();
+              name.setEllipsize(TextUtils.TruncateAt.END);
+              add(item, name);
+              if (!preview.isEmpty()) {
+                TextView detail = text(preview, 12, muted);
+                detail.setSingleLine();
+                detail.setEllipsize(TextUtils.TruncateAt.END);
+                add(item, detail);
+              }
+              item.setContentDescription(title + ", open chat");
+              item.setOnClickListener(
+                  v -> {
+                    if (c.running || c.submissionPending) {
+                      toast("Finish this task first.");
+                      return;
+                    }
+                    c.save();
+                    c.resume(id);
+                    sessionsExpanded = false;
+                    needsScroll = true;
+                    show("chat");
+                  });
+              item.setOnLongClickListener(
+                  v -> {
+                    sessionMenu(session);
+                    return true;
+                  });
+              add(list, item);
+              count++;
+            }
+          if (count == 0) add(list, label(query.isEmpty() ? "no chats yet" : "no matching chats"));
+        };
+    search.addTextChangedListener(
+        new TextWatcher() {
+          public void beforeTextChanged(CharSequence s, int st, int co, int a) {}
+
+          public void onTextChanged(CharSequence s, int st, int b, int co) {
+            render.run();
+          }
+
+          public void afterTextChanged(Editable e) {}
+        });
+    render.run();
+    if (c.gateway != null && c.gateway.online())
+      c.list(
+          (v, e) -> {
+            if (!sessionsExpanded || sessionPane == null || isDestroyed()) return;
+            if (e == null) render.run();
+            else toast(e);
+          });
   }
 
   private void renderTranscript() {
@@ -408,9 +520,9 @@ public final class MainActivity extends Activity implements Controller.Observer 
       ImageView logo = new ImageView(this);
       logo.setImageResource(R.drawable.lcb_logo);
       logo.setBackgroundColor(color("#faf9f1"));
-      welcome.addView(logo, new LinearLayout.LayoutParams(dp(72), dp(72)));
+      welcome.addView(logo, new LinearLayout.LayoutParams(dp(44), dp(44)));
       gap(welcome, 12);
-      TextView ready = text("ready when you are.", 20, ink);
+      TextView ready = text("what are we working on?", 20, ink);
       ready.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
       welcome.addView(ready);
       welcome.addView(
@@ -421,23 +533,25 @@ public final class MainActivity extends Activity implements Controller.Observer 
               15,
               muted));
       gap(welcome, 12);
-      welcome.addView(
-          button(
-              c.profile() == null ? "connect a server" : "reconnect",
-              () -> {
-                if (c.profile() == null) loginDialog();
-                else c.connectSaved();
-              }));
+      if (c.profile() == null || c.gateway == null || !c.gateway.online())
+        welcome.addView(
+            button(
+                c.profile() == null ? "connect a server" : "reconnect",
+                () -> {
+                  if (c.profile() == null) loginDialog();
+                  else c.connectSaved();
+                }));
       if (c.profile() == null) welcome.addView(button("look around", c::demo));
       add(transcript, welcome);
     }
     int shown = 0;
     for (int i = Math.max(0, c.rows.size() - 160); i < c.rows.size(); i++) {
       JSONObject item = c.rows.get(i);
-      String role = item.optString("role"), body = Protocol.text(item);
-      if (!(role.equals("user") || role.equals("assistant")) || body.trim().isEmpty()) continue;
+      String role = item.optString("role"), body = Attachments.displayText(item);
+      if (!(role.equals("user") || role.equals("assistant"))
+          || (body.trim().isEmpty() && item.optJSONArray("attachments") == null)) continue;
       LinearLayout block = column();
-      block.setBackground(bevel(role.equals("user") ? blue : paper, role.equals("assistant")));
+      block.setBackground(surface(role.equals("user") ? blue : paper, 10, true));
       block.setPadding(dp(4), dp(4), dp(4), dp(4));
       LinearLayout meta = row();
       TextView who = label(role.equals("user") ? "you" : "hermes");
@@ -446,9 +560,10 @@ public final class MainActivity extends Activity implements Controller.Observer 
       TextView copy = text("copy", 12, muted);
       copy.setPadding(dp(10), dp(7), dp(10), dp(7));
       copy.setContentDescription("copy " + role + " message");
-      copy.setOnClickListener(v -> copy(Protocol.text(item)));
+      copy.setOnClickListener(v -> copy(Attachments.displayText(item)));
       meta.addView(copy);
       add(block, meta);
+      renderImages(block, Attachments.forRow(item), false);
       TextView bodyView = text(body, 16, ink);
       bodyView.setTextIsSelectable(true);
       bodyView.setLineSpacing(dp(1), 1);
@@ -506,9 +621,12 @@ public final class MainActivity extends Activity implements Controller.Observer 
         (p == null ? "no server" : p.optString("name"))
             + "  ·  "
             + (c.running ? "working" : c.status));
-    if (!page.equals("chat")) return;
-    heading.setText(c.title);
-    modelLabel.setText(c.model.isEmpty() ? "server default" : c.model);
+    if (!page.equals("chat")) {
+      if (serverStatus != null) serverStatus.setText(c.status);
+      return;
+    }
+    sessionPicker.setText(c.title + "  ⌄");
+    modelLabel.setText((c.model.isEmpty() ? "server default" : c.model) + "  ⌄");
     if (notice != null) {
       String n = c.notice;
       notice.setText(n);
@@ -516,8 +634,12 @@ public final class MainActivity extends Activity implements Controller.Observer 
     }
     approval.setText("answer request · " + c.requests.size());
     approval.setVisibility(c.requests.isEmpty() ? View.GONE : View.VISIBLE);
-    send.setText(c.running ? "stop" : "send");
-    send.setEnabled(!c.submissionPending || c.running);
+    send.setContentDescription(c.running ? "stop Hermes" : "send message");
+    Glyph sendIcon = new Glyph(c.running ? "stop" : "send", accentInk);
+    sendIcon.setBounds(0, 0, dp(20), dp(20));
+    send.setCompoundDrawables(sendIcon, null, null, null);
+    send.setEnabled(c.running || (!c.submissionPending && c.uploadsPending == 0));
+    renderAttachmentTray();
     if (composer != null
         && !composer.getText().toString().equals(c.draft)
         && !c.submissionPending) {
@@ -529,7 +651,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
     if (structure) renderTranscript();
     else
       for (Map.Entry<JSONObject, TextView> e : messageViews.entrySet()) {
-        String value = Protocol.text(e.getKey());
+        String value = Attachments.displayText(e.getKey());
         if (!value.equals(e.getValue().getTag())) {
           markdown.setMarkdown(e.getValue(), value);
           e.getValue().setTag(value);
@@ -549,7 +671,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
       "forget this server",
       "about"
     };
-    new AlertDialog.Builder(this)
+    new Sheet.Builder(this)
         .setTitle("lcb-hermes")
         .setItems(
             options,
@@ -576,7 +698,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
                   break;
                 case 5:
                   if (c.profile() != null)
-                    new AlertDialog.Builder(this)
+                    new Sheet.Builder(this)
                         .setTitle("forget this server?")
                         .setMessage(
                             "Remove its saved login, draft, and cached chat from this phone. Server"
@@ -586,8 +708,8 @@ public final class MainActivity extends Activity implements Controller.Observer 
                         .show();
                   break;
                 case 6:
-                  new AlertDialog.Builder(this)
-                      .setTitle("lcb-hermes 0.1.2")
+                  new Sheet.Builder(this)
+                      .setTitle("lcb-hermes 0.2.0")
                       .setMessage(
                           "A small client for Hermes.\n\n"
                               + "No ads. No purchases. No analytics.\n\n"
@@ -619,7 +741,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
     e.setImportantForAutofill(
         password ? View.IMPORTANT_FOR_AUTOFILL_YES : View.IMPORTANT_FOR_AUTOFILL_NO);
     if (password) e.setAutofillHints(View.AUTOFILL_HINT_PASSWORD);
-    e.setBackground(bevel(paper, true));
+    e.setBackground(surface(paper, 8, true));
     e.setPadding(dp(10), dp(8), dp(10), dp(8));
     add(box, label(hint));
     add(box, e);
@@ -637,7 +759,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
       text.setBackgroundColor(paper);
       ScrollView scroll = new ScrollView(this);
       scroll.addView(text);
-      new AlertDialog.Builder(this)
+      new Sheet.Builder(this)
           .setTitle("licenses")
           .setView(scroll)
           .setPositiveButton("close", null)
@@ -649,8 +771,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
 
   private void loginDialog() {
     LinearLayout box = column();
-    box.setBackgroundColor(face);
-    box.setPadding(dp(16), dp(8), dp(16), dp(8));
+    box.setPadding(0, 0, 0, 0);
     EditText name = field(box, "server name", "", false);
     JSONObject current = c.profile();
     EditText url =
@@ -660,6 +781,10 @@ public final class MainActivity extends Activity implements Controller.Observer 
     EditText user =
         field(box, "username", current == null ? "" : current.optString("username"), false);
     EditText pass = field(box, "password", "", true);
+    name.setHint("a name for this server");
+    url.setHint("http(s)://your-server");
+    user.setHint("");
+    pass.setHint("");
     CheckBox http = new CheckBox(this);
     http.setText("allow private HTTP (try automatically)");
     http.setTextSize(13);
@@ -673,8 +798,8 @@ public final class MainActivity extends Activity implements Controller.Observer 
     add(box, error);
     ScrollView scroll = new ScrollView(this);
     scroll.addView(box);
-    AlertDialog dialog =
-        new AlertDialog.Builder(this)
+    Sheet dialog =
+        new Sheet.Builder(this)
             .setTitle("connect a server")
             .setView(scroll)
             .setNegativeButton("cancel", (d, w) -> pass.setText(""))
@@ -717,7 +842,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
     String[] names = new String[list.length() + 1];
     for (int i = 0; i < list.length(); i++) names[i] = list.optJSONObject(i).optString("name");
     names[list.length()] = "+ add server";
-    new AlertDialog.Builder(this)
+    new Sheet.Builder(this)
         .setTitle("servers")
         .setItems(
             names,
@@ -731,118 +856,9 @@ public final class MainActivity extends Activity implements Controller.Observer 
         .show();
   }
 
-  private boolean connected() {
-    if (c.gateway == null || !c.gateway.online()) {
-      add(content, text("Connect to your server to load this view.", 16, ink));
-      add(
-          content,
-          button(
-              "connect",
-              () -> {
-                if (c.profile() == null) loginDialog();
-                else c.connectSaved();
-              }));
-      return false;
-    }
-    return true;
-  }
-
-  private void sessions() {
-    LinearLayout top = row();
-    weighted(top, text("sessions", 18, ink));
-    top.addView(button("refresh", () -> show("sessions")));
-    add(content, top);
-    if (!connected()) return;
-    EditText search = new EditText(this);
-    search.setTextColor(ink);
-    search.setHintTextColor(muted);
-    search.setHint("find a chat");
-    search.setSingleLine();
-    search.setBackground(bevel(paper, true));
-    search.setPadding(dp(12), dp(10), dp(12), dp(10));
-    add(content, search);
-    gap(content, 8);
-    ScrollView scroll = new ScrollView(this);
-    LinearLayout list = column();
-    scroll.addView(list);
-    content.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-    TextView wait = label("loading…");
-    add(list, wait);
-    Runnable render =
-        () -> {
-          list.removeAllViews();
-          String query = search.getText().toString().toLowerCase(Locale.ROOT);
-          JSONArray all = c.sessions;
-          if (all == null) return;
-          int count = 0;
-          for (int i = 0; i < all.length(); i++) {
-            JSONObject session = all.optJSONObject(i);
-            if (session == null) continue;
-            String title = session.optString("title", "untitled"),
-                preview = session.optString("preview");
-            if (!(title + preview).toLowerCase(Locale.ROOT).contains(query)) continue;
-            LinearLayout item = column();
-            item.setBackground(bevel(paper, false));
-            TextView titleView = text(title, 16, ink);
-            titleView.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-            add(item, titleView);
-            TextView previewView = text(preview, 13, muted);
-            previewView.setMaxLines(2);
-            add(item, previewView);
-            add(
-                item,
-                label(
-                    session.optInt("message_count")
-                        + " messages · "
-                        + session.optString("source")));
-            item.setPadding(dp(4), dp(5), dp(4), dp(5));
-            item.setFocusable(true);
-            item.setContentDescription(title + ", open chat");
-            item.setOnClickListener(
-                v -> {
-                  if (c.running) {
-                    toast("Finish or stop the current task first.");
-                    return;
-                  }
-                  c.save();
-                  c.resume(session.optString("id"));
-                  needsScroll = true;
-                  show("chat");
-                });
-            item.setOnLongClickListener(
-                v -> {
-                  sessionMenu(session);
-                  return true;
-                });
-            add(list, item);
-            gap(list, 8);
-            count++;
-          }
-          if (count == 0) add(list, text("no sessions yet.", 16, muted));
-        };
-    search.addTextChangedListener(
-        new TextWatcher() {
-          public void beforeTextChanged(CharSequence s, int st, int co, int a) {}
-
-          public void onTextChanged(CharSequence s, int st, int b, int co) {
-            render.run();
-          }
-
-          public void afterTextChanged(Editable e) {}
-        });
-    c.list(
-        (v, e) -> {
-          if (!page.equals("sessions") || isDestroyed()) return;
-          if (e != null) {
-            list.removeAllViews();
-            add(list, text(e, 15, ink));
-          } else render.run();
-        });
-  }
-
   private void sessionMenu(JSONObject session) {
     String id = session.optString("id");
-    new AlertDialog.Builder(this)
+    new Sheet.Builder(this)
         .setTitle(session.optString("title", "chat"))
         .setItems(
             new String[] {"rename", "delete"},
@@ -851,7 +867,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
                 LinearLayout box = column();
                 box.setPadding(dp(16), 0, dp(16), 0);
                 EditText name = field(box, "title", session.optString("title"), false);
-                new AlertDialog.Builder(this)
+                new Sheet.Builder(this)
                     .setTitle("rename chat")
                     .setView(box)
                     .setNegativeButton("cancel", null)
@@ -867,7 +883,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
                                 }))
                     .show();
               } else
-                new AlertDialog.Builder(this)
+                new Sheet.Builder(this)
                     .setTitle("delete this chat?")
                     .setMessage("This removes it from the server. It cannot be undone.")
                     .setNegativeButton("cancel", null)
@@ -923,13 +939,13 @@ public final class MainActivity extends Activity implements Controller.Observer 
                 for (int j = 0; j < ms.length(); j++) {
                   String m = ms.optString(j);
                   if (m.isEmpty()) continue;
-                  labels.add(p.optString("name", p.optString("slug")) + " · " + m);
+                  labels.add(m + "\n" + p.optString("name", p.optString("slug")));
                   models.add(m);
                   providers.add(p.optString("slug"));
                 }
             }
           modelDialog =
-              new AlertDialog.Builder(this)
+              new Sheet.Builder(this)
                   .setTitle("model for a new chat")
                   .setItems(
                       labels.toArray(new String[0]),
@@ -939,11 +955,13 @@ public final class MainActivity extends Activity implements Controller.Observer 
                           return;
                         }
                         if (!c.sessionId.isEmpty() || !c.rows.isEmpty())
-                          new AlertDialog.Builder(this)
+                          new Sheet.Builder(this)
                               .setTitle("start a new chat?")
                               .setMessage(
                                   "Use "
-                                      + labels.get(n)
+                                      + (models.get(n).isEmpty()
+                                          ? "the server default"
+                                          : models.get(n))
                                       + " in a new session. This chat is saved on the server.")
                               .setNegativeButton("cancel", null)
                               .setPositiveButton(
@@ -966,146 +984,11 @@ public final class MainActivity extends Activity implements Controller.Observer 
         });
   }
 
-  private void files() {
-    LinearLayout bar = row();
-    weighted(bar, text("files", 18, ink));
-    bar.addView(button("upload", () -> pickFile(false)));
-    bar.addView(button("refresh", () -> show("files")));
-    add(content, bar);
-    if (!connected()) return;
-    TextView path = label(filesPath.isEmpty() ? "managed files" : filesPath);
-    add(content, path);
-    ScrollView scroll = new ScrollView(this);
-    LinearLayout list = column();
-    scroll.addView(list);
-    content.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-    add(list, label("loading…"));
-    String query = filesPath.isEmpty() ? "" : "?path=" + Uri.encode(filesPath);
-    c.gateway.rest(
-        "/api/files" + query,
-        null,
-        (v, e) -> {
-          if (!page.equals("files") || isDestroyed()) return;
-          list.removeAllViews();
-          if (e != null) {
-            add(list, text(e, 15, ink));
-            return;
-          }
-          filesLoaded = true;
-          filesPath = v.optString("path");
-          parentPath = v.optString("parent");
-          path.setText(filesPath);
-          if (!parentPath.isEmpty() && !parentPath.equals("null"))
-            add(
-                list,
-                button(
-                    ".. parent",
-                    () -> {
-                      filesPath = parentPath;
-                      show("files");
-                    }));
-          JSONArray entries = v.optJSONArray("entries");
-          if (entries == null || entries.length() == 0)
-            add(list, text("nothing here yet.", 16, muted));
-          else
-            for (int i = 0; i < entries.length(); i++) {
-              JSONObject file = entries.optJSONObject(i);
-              if (file == null) continue;
-              boolean dir =
-                  file.optBoolean(
-                      "is_directory",
-                      file.optBoolean("is_dir", file.optString("type").equals("directory")));
-              Button b =
-                  button(
-                      (dir ? "▣  " : "□  ") + file.optString("name"),
-                      () -> {
-                        if (dir) {
-                          filesPath = file.optString("path");
-                          show("files");
-                        } else readFile(file);
-                      });
-              b.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-              add(list, b);
-              gap(list, 5);
-            }
-        });
-  }
-
-  private void readFile(JSONObject file) {
-    long size = file.optLong("size");
-    if (size > 20 * 1024 * 1024) {
-      toast("This file is too large for the mobile preview. Use the dashboard.");
-      return;
-    }
-    c.gateway.rest(
-        "/api/files/read?path=" + Uri.encode(file.optString("path")),
-        null,
-        (v, e) -> {
-          if (e != null) {
-            toast(e);
-            return;
-          }
-          try {
-            String data = v.optString("data_url");
-            int comma = data.indexOf(',');
-            if (comma < 0) throw new IOException();
-            byte[] bytes =
-                android.util.Base64.decode(data.substring(comma + 1), android.util.Base64.DEFAULT);
-            LinearLayout box = column();
-            box.setPadding(dp(12), dp(12), dp(12), dp(12));
-            box.setBackgroundColor(paper);
-            String mime = v.optString("mime_type");
-            if (mime.startsWith("image/") && !mime.contains("svg")) {
-              BitmapFactory.Options o = new BitmapFactory.Options();
-              o.inJustDecodeBounds = true;
-              BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o);
-              o.inSampleSize = Math.max(1, Math.max(o.outWidth, o.outHeight) / 1600);
-              o.inJustDecodeBounds = false;
-              Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, o);
-              ImageView image = new ImageView(this);
-              image.setAdjustViewBounds(true);
-              image.setImageBitmap(bitmap);
-              add(box, image);
-            } else if (mime.startsWith("text/")
-                || mime.contains("json")
-                || mime.contains("xml")
-                || mime.contains("javascript")) {
-              String t = new String(bytes, StandardCharsets.UTF_8);
-              if (t.length() > 64000) t = t.substring(0, 64000) + "\n… preview truncated";
-              TextView preview = text(t, 14, ink);
-              preview.setTypeface(Typeface.MONOSPACE);
-              preview.setTextIsSelectable(true);
-              add(box, preview);
-            } else add(box, text(mime + " · " + bytes.length + " bytes", 15, ink));
-            ScrollView scroll = new ScrollView(this);
-            scroll.addView(box);
-            new AlertDialog.Builder(this)
-                .setTitle(v.optString("name", "file"))
-                .setView(scroll)
-                .setNegativeButton("close", null)
-                .setNeutralButton(
-                    "attach to chat",
-                    (x, y) -> {
-                      appendDraft("Attached file on server: " + v.optString("path"));
-                      show("chat");
-                    })
-                .setPositiveButton(
-                    "save a copy", (x, y) -> saveAs(bytes, v.optString("name", "file"), mime))
-                .show();
-          } catch (Exception x) {
-            toast("Could not preview this file.");
-          }
-        });
-  }
-
-  private boolean attachToChat;
-
-  private void pickFile(boolean chat) {
+  private void pickFile() {
     if (c.gateway == null || !c.gateway.online()) {
       toast("Connect before attaching files.");
       return;
     }
-    attachToChat = chat;
     Intent i =
         new Intent(Intent.ACTION_OPEN_DOCUMENT)
             .setType("*/*")
@@ -1121,14 +1004,25 @@ public final class MainActivity extends Activity implements Controller.Observer 
       if (q != null && q.moveToFirst()) name = q.getString(0);
     } catch (Exception ignored) {
     }
+    if (c.attachments.length() >= 6) {
+      toast("Send these attachments before adding more.");
+      return;
+    }
+    if (name == null || name.trim().isEmpty()) name = "attachment";
     name = name.replaceAll("[\\\\/\\p{Cntrl}]", "_");
     final String filename = name;
-    boolean chat = attachToChat;
-    String target =
-        chat
-            ? "uploads/" + System.currentTimeMillis() + "-" + filename
-            : (filesPath.isEmpty() ? filename : filesPath + "/" + filename);
-    toast("uploading…");
+    String target = "uploads/" + UUID.randomUUID() + "-" + filename;
+    String mime = getContentResolver().getType(uri);
+    final String type = mime == null ? "application/octet-stream" : mime;
+    final String sourceProfile = c.profileId, sourceChat = c.storedId;
+    final Gateway sourceGateway = c.gateway;
+    if (c.running || c.submissionPending) {
+      toast("Finish this task before attaching a file.");
+      return;
+    }
+    c.uploadsPending++;
+    c.changed(false);
+
     c.disk.execute(
         () -> {
           try (InputStream in = getContentResolver().openInputStream(uri);
@@ -1142,33 +1036,126 @@ public final class MainActivity extends Activity implements Controller.Observer 
                 throw new IOException("Mobile uploads are limited to 20 MB.");
             }
             byte[] bytes = out.toByteArray();
+            String thumbnail = Attachments.thumbnail(bytes, type);
             runOnUiThread(
                 () -> {
-                  if (c.gateway == null || !c.gateway.online()) {
+                  if (sourceGateway != c.gateway
+                      || !sourceGateway.online()
+                      || !sourceProfile.equals(c.profileId)
+                      || !sourceChat.equals(c.storedId)) {
+                    c.uploadsPending = Math.max(0, c.uploadsPending - 1);
+                    c.changed(false);
                     toast("Connection lost. Choose the file again after reconnecting.");
                     return;
                   }
-                  c.gateway.upload(
+                  sourceGateway.upload(
                       target,
                       filename,
                       bytes,
                       (v, e) -> {
+                        c.uploadsPending = Math.max(0, c.uploadsPending - 1);
                         if (e != null) {
                           toast(e);
+                          c.changed(false);
                           return;
                         }
-                        toast("uploaded");
-                        if (chat) {
-                          appendDraft("Attached file on server: " + v.optString("path", target));
-                          show("chat");
-                        } else show("files");
+                        if (sourceGateway != c.gateway
+                            || !sourceProfile.equals(c.profileId)
+                            || !sourceChat.equals(c.storedId)) {
+                          toast("Chat changed. Choose the attachment again.");
+                          c.changed(false);
+                          return;
+                        }
+                        c.addAttachment(
+                            obj(
+                                "id",
+                                UUID.randomUUID().toString(),
+                                "name",
+                                filename,
+                                "mime",
+                                type,
+                                "path",
+                                v.optString("path", target),
+                                "thumbnail",
+                                thumbnail));
                       });
                 });
           } catch (Exception e) {
             runOnUiThread(
-                () -> toast(e.getMessage() == null ? "Could not read that file." : e.getMessage()));
+                () -> {
+                  c.uploadsPending = Math.max(0, c.uploadsPending - 1);
+                  c.changed(false);
+                  toast(e.getMessage() == null ? "Could not read that file." : e.getMessage());
+                });
           }
         });
+  }
+
+  private void renderAttachmentTray() {
+    if (attachmentTray == null) return;
+    attachmentTray.removeAllViews();
+    renderImages(attachmentTray, c.attachments, true);
+    if (c.uploadsPending > 0) add(attachmentTray, label("loading attachment…"));
+    attachmentTray.setVisibility(
+        c.attachments.length() == 0 && c.uploadsPending == 0 ? View.GONE : View.VISIBLE);
+  }
+
+  private void renderImages(LinearLayout parent, JSONArray attachments, boolean pending) {
+    if (attachments == null || attachments.length() == 0) return;
+    HorizontalScrollView scroll = new HorizontalScrollView(this);
+    scroll.setHorizontalScrollBarEnabled(false);
+    LinearLayout images = row();
+    scroll.addView(images);
+    add(parent, scroll);
+    for (int i = 0; i < attachments.length(); i++) {
+      JSONObject a = attachments.optJSONObject(i);
+      if (a == null) continue;
+      LinearLayout tile = column();
+      tile.setPadding(dp(4), dp(4), dp(4), dp(4));
+      Bitmap bitmap = Attachments.bitmap(a);
+      if (bitmap != null) {
+        ImageView image = new ImageView(this);
+        image.setImageBitmap(bitmap);
+        image.setScaleType(
+            pending ? ImageView.ScaleType.CENTER_CROP : ImageView.ScaleType.FIT_CENTER);
+        image.setBackground(surface(paper, 8, true));
+        image.setClipToOutline(true);
+        image.setContentDescription(
+            (pending ? "attachment preview: " : "attached image: ") + a.optString("name", "image"));
+        float ratio = (float) bitmap.getWidth() / bitmap.getHeight();
+        int width = pending ? 82 : Math.min(240, Math.round(220 * ratio));
+        int height = pending ? 74 : Math.min(220, Math.round(width / ratio));
+        tile.addView(image, new LinearLayout.LayoutParams(dp(width), dp(height)));
+        image.setOnClickListener(
+            v -> {
+              ImageView full = new ImageView(this);
+              full.setImageBitmap(bitmap);
+              full.setAdjustViewBounds(true);
+              full.setMaxHeight(dp(460));
+              new Sheet.Builder(this)
+                  .setTitle(a.optString("name", "image"))
+                  .setView(full)
+                  .setPositiveButton("done", null)
+                  .show();
+            });
+      } else {
+        TextView file = text(a.optString("name", "file"), 13, ink);
+        file.setMaxLines(2);
+        file.setEllipsize(TextUtils.TruncateAt.END);
+        file.setBackground(surface(blue, 8, false));
+        file.setMinHeight(dp(52));
+        tile.addView(file, new LinearLayout.LayoutParams(dp(140), -2));
+      }
+      if (pending) {
+        TextView remove = text("remove", 11, muted);
+        remove.setGravity(Gravity.CENTER);
+        remove.setPadding(0, dp(6), 0, dp(6));
+        remove.setContentDescription("remove attachment " + a.optString("name"));
+        remove.setOnClickListener(v -> c.removeAttachment(a.optString("id")));
+        add(tile, remove);
+      }
+      images.addView(tile);
+    }
   }
 
   private void appendDraft(String value) {
@@ -1178,81 +1165,48 @@ public final class MainActivity extends Activity implements Controller.Observer 
 
   private void server() {
     LinearLayout top = row();
+    top.addView(iconButton("back", "back to chat", () -> show("chat")));
     weighted(top, text("server", 18, ink));
-    top.addView(button("refresh", () -> show("server")));
+    top.addView(iconButton("more", "settings", this::menu));
     add(content, top);
-    if (!connected()) return;
-    ScrollView scroll = new ScrollView(this);
-    LinearLayout body = column();
-    scroll.addView(body);
-    content.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+    gap(content, 14);
+    LinearLayout card = column();
+    card.setPadding(dp(12), dp(14), dp(12), dp(14));
+    card.setBackground(surface(paper, 12, true));
+    add(content, card);
     JSONObject p = c.profile();
-    add(body, text(p.optString("name"), 18, ink));
-    add(body, label(p.optString("url")));
-    add(body, label("model · " + c.model));
+    if (p == null) {
+      add(card, text("Connect your Hermes server", 18, ink));
+      add(card, text("Your chats and tools stay on your server.", 14, muted));
+      gap(card, 10);
+      add(card, button("connect a server", this::loginDialog));
+      return;
+    }
+    add(card, text(p.optString("name"), 18, ink));
+    add(card, label(p.optString("url")));
+    serverStatus = label(c.status);
+    add(card, serverStatus);
+    gap(card, 12);
     add(
-        body,
+        card,
+        button(
+            "reconnect",
+            () -> {
+              c.close();
+              c.connectSaved();
+            }));
+    gap(card, 6);
+    add(card, button("servers", this::profiles));
+    gap(card, 6);
+    add(card, button("open dashboard", () -> openLink(p.optString("url"))));
+    gap(content, 16);
+    add(
+        content,
         text(
-            "The agent runs on your server. Browser, terminal, and other tools stay there.",
-            15,
+            "Hermes works here. Model accounts, browser tools, and other settings live in the"
+                + " dashboard.",
+            14,
             muted));
-    add(body, button("open dashboard", () -> openLink(p.optString("url"))));
-    c.gateway.rest(
-        "/api/system/stats",
-        null,
-        (v, e) -> {
-          if (!page.equals("server") || isDestroyed()) return;
-          if (e == null) {
-            add(body, label("resources"));
-            add(body, text(resourceSummary(v), 15, ink));
-          } else add(body, label(e));
-        });
-    c.gateway.rest(
-        "/api/cron/jobs",
-        null,
-        (v, e) -> {
-          if (!page.equals("server") || isDestroyed()) return;
-          add(body, label("scheduled jobs"));
-          if (e != null) add(body, label(e));
-          else {
-            JSONArray jobs = v.optJSONArray("jobs");
-            if (jobs == null || jobs.length() == 0) add(body, text("none yet.", 15, muted));
-            else
-              for (int n = 0; n < jobs.length(); n++) {
-                JSONObject job = jobs.optJSONObject(n);
-                if (job != null)
-                  add(
-                      body,
-                      text(
-                          job.optString("name", job.optString("id"))
-                              + "\n"
-                              + job.optString("schedule"),
-                          15,
-                          ink));
-              }
-          }
-        });
-  }
-
-  private String resourceSummary(JSONObject v) {
-    StringBuilder out = new StringBuilder("Hermes " + v.optString("hermes_version", "unknown"));
-    if (v.has("cpu_percent"))
-      out.append("\nCPU ").append(Math.round(v.optDouble("cpu_percent"))).append("%");
-    JSONObject mem = v.optJSONObject("memory");
-    if (mem != null)
-      out.append(
-          String.format(
-              Locale.ROOT,
-              "\nMemory %.1f / %.1f GB",
-              mem.optDouble("used") / 1073741824,
-              mem.optDouble("total") / 1073741824));
-    JSONObject proc = v.optJSONObject("process");
-    if (proc != null)
-      out.append(
-          String.format(Locale.ROOT, "\nHermes process %.0f MB", proc.optDouble("rss") / 1048576));
-    if (v.has("uptime_seconds"))
-      out.append("\nServer uptime ").append(v.optLong("uptime_seconds") / 3600).append("h");
-    return out.toString();
   }
 
   private String pretty(JSONObject value) {
@@ -1270,7 +1224,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
     details.setBackgroundColor(paper);
     ScrollView scroll = new ScrollView(this);
     scroll.addView(details);
-    new AlertDialog.Builder(this)
+    new Sheet.Builder(this)
         .setTitle(tool.optString("name", "tool"))
         .setView(scroll)
         .setPositiveButton("close", null)
@@ -1292,8 +1246,8 @@ public final class MainActivity extends Activity implements Controller.Observer 
       String command = p.optString("command"),
           description = p.optString("description", "Hermes is asking to run a command.");
       JSONObject params = p;
-      AlertDialog.Builder b =
-          new AlertDialog.Builder(this)
+      Sheet.Builder b =
+          new Sheet.Builder(this)
               .setTitle("allow this action?")
               .setMessage(description + (command.isEmpty() ? "" : "\n\n" + command))
               .setNegativeButton("deny", (d, w) -> c.answer(r, obj("choice", "deny")));
@@ -1302,7 +1256,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
       if (choices != null)
         for (int i = 0; i < choices.length(); i++) once |= choices.optString(i).equals("once");
       if (once) b.setPositiveButton("allow once", (d, w) -> c.answer(r, obj("choice", "once")));
-      AlertDialog dialog = b.create();
+      Sheet dialog = b.create();
       dialog.setOnCancelListener(d -> c.answer(r, obj("choice", "deny")));
       dialog.setOnDismissListener(d -> dialogOpen = false);
       dialog.show();
@@ -1352,8 +1306,8 @@ public final class MainActivity extends Activity implements Controller.Observer 
       }
     ScrollView scroll = new ScrollView(this);
     scroll.addView(box);
-    AlertDialog dialog =
-        new AlertDialog.Builder(this)
+    Sheet dialog =
+        new Sheet.Builder(this)
             .setTitle(
                 "Hermes asks"
                     + (questions.length() > 1
@@ -1417,7 +1371,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
   }
 
   private void exportChat() {
-    new AlertDialog.Builder(this)
+    new Sheet.Builder(this)
         .setTitle("export chat")
         .setItems(
             new String[] {"save Markdown", "share text", "copy text"},
