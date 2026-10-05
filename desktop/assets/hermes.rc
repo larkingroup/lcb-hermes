@@ -1,0 +1,26 @@
+#include <windows.h>
+101 ICON "hermes.ico"
+1 RT_MANIFEST "hermes.manifest"
+1 VERSIONINFO
+FILEVERSION 0,4,0,0
+PRODUCTVERSION 0,4,0,0
+FILEFLAGSMASK 0x3fL
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904b0"
+  BEGIN
+   VALUE "CompanyName", "Larkin Computing Bureau\0"
+   VALUE "FileDescription", "lcb-hermes\0"
+   VALUE "FileVersion", "0.4.0\0"
+   VALUE "ProductName", "lcb-hermes\0"
+   VALUE "OriginalFilename", "lcb-hermes.exe\0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x409, 1200
+ END
+END
