@@ -33,10 +33,12 @@ public final class MainActivity extends Activity implements Controller.Observer 
   private final Map<JSONObject, TextView> messageViews = new IdentityHashMap<>();
   private final ArrayList<Button> tabs = new ArrayList<>();
   private Markwon markdown;
-  private int face, paper, light, shadow, ink, muted, blue, blueInk;
+  private int face, paper, light, shadow, ink, muted, blue, blueInk, accent, accentInk;
   private String page = "chat", theme = "", filesPath = "", parentPath = "";
   private boolean syncingDraft, filesLoaded, needsScroll = true, dialogOpen;
   private boolean followTail = true;
+  private boolean modelPickerPending;
+  private AlertDialog modelDialog;
   private byte[] pendingExport;
   private static final int PICK_FILE = 2, SAVE_FILE = 3, VOICE = 4;
 
@@ -69,7 +71,15 @@ public final class MainActivity extends Activity implements Controller.Observer 
   @Override
   protected void onDestroy() {
     c.detach(this);
+    if (modelDialog != null) modelDialog.dismiss();
     super.onDestroy();
+  }
+
+  @Override
+  protected void onNewIntent(Intent intent) {
+    super.onNewIntent(intent);
+    setIntent(intent);
+    if (intent.getBooleanExtra("reply", false)) show("chat");
   }
 
   @Override
@@ -103,14 +113,16 @@ public final class MainActivity extends Activity implements Controller.Observer 
   private void colors() {
     theme = c.data.optString("theme", "light");
     boolean dark = theme.equals("dark");
-    face = color(dark ? "#282e32" : "#ece9d8");
-    paper = color(dark ? "#171e22" : "#ffffff");
-    light = color(dark ? "#505b61" : "#faf9f1");
-    shadow = color(dark ? "#101619" : "#999a91");
-    ink = color(dark ? "#e1e5e7" : "#2f373a");
-    muted = color(dark ? "#a6b3ba" : "#677173");
-    blue = color(dark ? "#354c5c" : "#c0d3e0");
-    blueInk = color(dark ? "#d4e4ed" : "#314c60");
+    face = color(dark ? "#303a42" : "#dedbc9");
+    paper = color(dark ? "#141c23" : "#fffef8");
+    light = color(dark ? "#73838e" : "#ffffff");
+    shadow = color(dark ? "#090e13" : "#697780");
+    ink = color(dark ? "#f0f2ed" : "#202e38");
+    muted = color(dark ? "#b8c5ce" : "#50616e");
+    blue = color(dark ? "#354e62" : "#c8ddec");
+    blueInk = color(dark ? "#ecf4fa" : "#203e55");
+    accent = color(dark ? "#456c88" : "#315870");
+    accentInk = color("#fffef8");
   }
 
   private LinearLayout column() {
@@ -129,9 +141,9 @@ public final class MainActivity extends Activity implements Controller.Observer 
   private TextView text(String value, int size, int col) {
     TextView v = new TextView(this);
     v.setText(value);
-    v.setTextSize(size);
+    v.setTextSize(Math.max(11, size * .9f));
     v.setTextColor(col);
-    v.setPadding(dp(10), dp(6), dp(10), dp(6));
+    v.setPadding(dp(8), dp(4), dp(8), dp(4));
     v.setIncludeFontPadding(false);
     return v;
   }
@@ -143,26 +155,31 @@ public final class MainActivity extends Activity implements Controller.Observer 
   }
 
   private Drawable bevel(int color, boolean inset) {
-    return new Bevel(color, light, shadow, inset);
+    return new Bevel(color, light, shadow, inset, dp(1));
   }
 
   private Button button(String value, Runnable click) {
     Button b = new Button(this);
     b.setText(value);
     b.setAllCaps(false);
-    b.setTextSize(14);
+    b.setTextSize(12);
     b.setTextColor(ink);
     b.setMinWidth(0);
     b.setMinimumWidth(0);
-    b.setMinHeight(dp(48));
-    b.setMinimumHeight(dp(48));
-    b.setPadding(dp(14), dp(4), dp(14), dp(4));
-    StateListDrawable bg = new StateListDrawable();
-    bg.addState(new int[] {android.R.attr.state_pressed}, bevel(face, true));
-    bg.addState(new int[] {}, bevel(face, false));
-    b.setBackground(bg);
+    b.setMinHeight(dp(40));
+    b.setMinimumHeight(dp(40));
+    b.setPadding(dp(10), dp(2), dp(10), dp(2));
+    buttonColors(b, face, ink);
     b.setOnClickListener(v -> click.run());
     return b;
+  }
+
+  private void buttonColors(Button b, int fill, int textColor) {
+    b.setTextColor(textColor);
+    StateListDrawable bg = new StateListDrawable();
+    bg.addState(new int[] {android.R.attr.state_pressed}, bevel(fill, true));
+    bg.addState(new int[] {}, bevel(fill, false));
+    b.setBackground(bg);
   }
 
   private void weighted(LinearLayout parent, View view) {
@@ -214,18 +231,20 @@ public final class MainActivity extends Activity implements Controller.Observer 
               WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
                   | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
     LinearLayout bar = row();
-    bar.setPadding(0, dp(6), 0, dp(4));
+    bar.setBackground(bevel(accent, false));
+    bar.setPadding(dp(5), dp(4), dp(4), dp(4));
     ImageView logo = new ImageView(this);
     logo.setImageResource(R.drawable.lcb_logo);
     logo.setBackgroundColor(color("#faf9f1"));
     logo.setPadding(dp(2), dp(2), dp(2), dp(2));
     logo.setContentDescription("LCB");
-    bar.addView(logo, new LinearLayout.LayoutParams(dp(42), dp(42)));
+    bar.addView(logo, new LinearLayout.LayoutParams(dp(32), dp(32)));
     LinearLayout names = compact() ? row() : column();
-    TextView app = text("lcb-hermes", 19, ink);
+    TextView app = text("lcb-hermes", 17, accentInk);
     app.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
     names.addView(app);
     connection = label("offline");
+    connection.setTextColor(accentInk);
     connection.setSingleLine(true);
     connection.setEllipsize(TextUtils.TruncateAt.END);
     names.addView(connection);
@@ -255,11 +274,8 @@ public final class MainActivity extends Activity implements Controller.Observer 
     messageViews.clear();
     notice = null;
     for (Button b : tabs) {
-      b.setBackground(
-          bevel(
-              b.getText().toString().equals(name) ? blue : face,
-              b.getText().toString().equals(name)));
-      b.setTextColor(b.getText().toString().equals(name) ? blueInk : ink);
+      boolean active = b.getText().toString().equals(name);
+      buttonColors(b, active ? accent : face, active ? accentInk : ink);
     }
     switch (name) {
       case "sessions":
@@ -279,8 +295,8 @@ public final class MainActivity extends Activity implements Controller.Observer 
 
   private void chat() {
     LinearLayout top = row();
-    top.setBackground(bevel(blue, false));
-    heading = text(c.title, 14, blueInk);
+    top.setBackground(bevel(accent, false));
+    heading = text(c.title, 14, accentInk);
     heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
     heading.setSingleLine(true);
     heading.setEllipsize(TextUtils.TruncateAt.END);
@@ -314,7 +330,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
     chatScroll.setFillViewport(true);
     chatScroll.setBackground(bevel(paper, true));
     transcript = column();
-    transcript.setPadding(dp(8), dp(8), dp(8), dp(8));
+    transcript.setPadding(dp(6), dp(6), dp(6), dp(6));
     chatScroll.addView(transcript);
     content.addView(chatScroll, new LinearLayout.LayoutParams(-1, 0, 1));
     notice = label("");
@@ -328,12 +344,13 @@ public final class MainActivity extends Activity implements Controller.Observer 
     composer.setTextColor(ink);
     composer.setHintTextColor(muted);
     composer.setHint("message Hermes…");
-    composer.setTextSize(16);
+    composer.setTextSize(14);
     composer.setGravity(Gravity.TOP);
-    composer.setMinLines(compact() ? 1 : 2);
+    composer.setMinLines(1);
+    composer.setMinimumHeight(dp(40));
     composer.setMaxLines(compact() ? 3 : 5);
     composer.setFilters(new InputFilter[] {new InputFilter.LengthFilter(100000)});
-    composer.setPadding(dp(8), dp(8), dp(8), dp(8));
+    composer.setPadding(dp(8), dp(6), dp(8), dp(6));
     composer.setBackground(bevel(paper, true));
     composer.setInputType(
         android.text.InputType.TYPE_CLASS_TEXT
@@ -370,6 +387,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
               }
             });
     actions.addView(send);
+    buttonColors(send, accent, accentInk);
     add(composeBox, actions);
     add(content, composeBox);
     gap(content, 6);
@@ -386,12 +404,12 @@ public final class MainActivity extends Activity implements Controller.Observer 
     if (c.rows.isEmpty()) {
       LinearLayout welcome = column();
       welcome.setGravity(Gravity.CENTER);
-      welcome.setPadding(dp(16), dp(32), dp(16), dp(32));
+      welcome.setPadding(dp(12), dp(24), dp(12), dp(24));
       ImageView logo = new ImageView(this);
       logo.setImageResource(R.drawable.lcb_logo);
       logo.setBackgroundColor(color("#faf9f1"));
-      welcome.addView(logo, new LinearLayout.LayoutParams(dp(100), dp(100)));
-      gap(welcome, 16);
+      welcome.addView(logo, new LinearLayout.LayoutParams(dp(72), dp(72)));
+      gap(welcome, 12);
       TextView ready = text("ready when you are.", 20, ink);
       ready.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
       welcome.addView(ready);
@@ -420,25 +438,25 @@ public final class MainActivity extends Activity implements Controller.Observer 
       if (!(role.equals("user") || role.equals("assistant")) || body.trim().isEmpty()) continue;
       LinearLayout block = column();
       block.setBackground(bevel(role.equals("user") ? blue : paper, role.equals("assistant")));
-      block.setPadding(dp(5), dp(5), dp(5), dp(5));
+      block.setPadding(dp(4), dp(4), dp(4), dp(4));
       LinearLayout meta = row();
       TextView who = label(role.equals("user") ? "you" : "hermes");
       who.setTextColor(role.equals("user") ? blueInk : muted);
       weighted(meta, who);
       TextView copy = text("copy", 12, muted);
-      copy.setPadding(dp(12), dp(12), dp(12), dp(12));
+      copy.setPadding(dp(10), dp(7), dp(10), dp(7));
       copy.setContentDescription("copy " + role + " message");
       copy.setOnClickListener(v -> copy(Protocol.text(item)));
       meta.addView(copy);
       add(block, meta);
       TextView bodyView = text(body, 16, ink);
       bodyView.setTextIsSelectable(true);
-      bodyView.setLineSpacing(dp(3), 1);
+      bodyView.setLineSpacing(dp(1), 1);
       markdown.setMarkdown(bodyView, body);
       add(block, bodyView);
       messageViews.put(item, bodyView);
       add(transcript, block);
-      gap(transcript, 10);
+      gap(transcript, 8);
       shown++;
     }
     toolsPanel = column();
@@ -569,7 +587,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
                   break;
                 case 6:
                   new AlertDialog.Builder(this)
-                      .setTitle("lcb-hermes 0.1.1")
+                      .setTitle("lcb-hermes 0.1.2")
                       .setMessage(
                           "A small client for Hermes.\n\n"
                               + "No ads. No purchases. No analytics.\n\n"
@@ -589,7 +607,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
     e.setHintTextColor(muted);
     e.setHint(hint);
     e.setText(value);
-    e.setTextSize(16);
+    e.setTextSize(14);
     e.setSingleLine();
     e.setInputType(
         password
@@ -602,7 +620,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
         password ? View.IMPORTANT_FOR_AUTOFILL_YES : View.IMPORTANT_FOR_AUTOFILL_NO);
     if (password) e.setAutofillHints(View.AUTOFILL_HINT_PASSWORD);
     e.setBackground(bevel(paper, true));
-    e.setPadding(dp(10), dp(12), dp(10), dp(12));
+    e.setPadding(dp(10), dp(8), dp(10), dp(8));
     add(box, label(hint));
     add(box, e);
     gap(box, 6);
@@ -636,18 +654,15 @@ public final class MainActivity extends Activity implements Controller.Observer 
     EditText name = field(box, "server name", "", false);
     JSONObject current = c.profile();
     EditText url =
-        field(
-            box,
-            "dashboard URL",
-            current == null ? "" : current.optString("url"),
-            false);
+        field(box, "dashboard URL", current == null ? "" : current.optString("url"), false);
     url.setInputType(
         android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
     EditText user =
         field(box, "username", current == null ? "" : current.optString("username"), false);
     EditText pass = field(box, "password", "", true);
     CheckBox http = new CheckBox(this);
-    http.setText("allow HTTP on private addresses");
+    http.setText("allow private HTTP (try automatically)");
+    http.setTextSize(13);
     http.setTextColor(ink);
     http.setChecked(current != null && current.optBoolean("http"));
     add(box, http);
@@ -667,13 +682,11 @@ public final class MainActivity extends Activity implements Controller.Observer 
             .create();
     dialog.setOnShowListener(
         d -> {
-          dialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
           dialog
               .getButton(-1)
               .setOnClickListener(
                   v -> {
                     String password = pass.getText().toString();
-                    pass.setText("");
                     dialog.getButton(-1).setEnabled(false);
                     error.setText("connecting…");
                     c.login(
@@ -688,6 +701,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
                             error.setText(err);
                             dialog.getButton(-1).setEnabled(true);
                           } else {
+                            pass.setText("");
                             dialog.dismiss();
                             show("chat");
                           }
@@ -695,6 +709,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
                   });
         });
     dialog.show();
+    dialog.setOnDismissListener(d -> pass.setText(""));
   }
 
   private void profiles() {
@@ -875,14 +890,19 @@ public final class MainActivity extends Activity implements Controller.Observer 
   }
 
   private void models() {
+    if (modelPickerPending || (modelDialog != null && modelDialog.isShowing())) return;
     if (c.gateway == null || !c.gateway.online()) {
       toast("Connect to select a model.");
       return;
     }
-    c.gateway.rpc(
+    modelPickerPending = true;
+    Gateway source = c.gateway;
+    source.rpc(
         "model.options",
         obj("include_unconfigured", false),
         (v, e) -> {
+          modelPickerPending = false;
+          if (isFinishing() || isDestroyed() || source != c.gateway) return;
           if (e != null) {
             toast(e);
             return;
@@ -908,38 +928,41 @@ public final class MainActivity extends Activity implements Controller.Observer 
                   providers.add(p.optString("slug"));
                 }
             }
-          new AlertDialog.Builder(this)
-              .setTitle("model for a new chat")
-              .setItems(
-                  labels.toArray(new String[0]),
-                  (d, n) -> {
-                    if (c.running) {
-                      toast("Finish this task first.");
-                      return;
-                    }
-                    c.newModel = models.get(n);
-                    c.newProvider = providers.get(n);
-                    if (!c.sessionId.isEmpty() || !c.rows.isEmpty())
-                      new AlertDialog.Builder(this)
-                          .setTitle("start a new chat?")
-                          .setMessage(
-                              "Use "
-                                  + labels.get(n)
-                                  + " in a new session. This chat is saved on the server.")
-                          .setNegativeButton("cancel", null)
-                          .setPositiveButton(
-                              "new chat",
-                              (x, y) -> {
-                                c.newChat();
-                                show("chat");
-                              })
-                          .show();
-                    else {
-                      c.model = c.newModel;
-                      update(false);
-                    }
-                  })
-              .show();
+          modelDialog =
+              new AlertDialog.Builder(this)
+                  .setTitle("model for a new chat")
+                  .setItems(
+                      labels.toArray(new String[0]),
+                      (d, n) -> {
+                        if (c.running || c.submissionPending) {
+                          toast("Finish this task first.");
+                          return;
+                        }
+                        if (!c.sessionId.isEmpty() || !c.rows.isEmpty())
+                          new AlertDialog.Builder(this)
+                              .setTitle("start a new chat?")
+                              .setMessage(
+                                  "Use "
+                                      + labels.get(n)
+                                      + " in a new session. This chat is saved on the server.")
+                              .setNegativeButton("cancel", null)
+                              .setPositiveButton(
+                                  "new chat",
+                                  (x, y) -> {
+                                    c.newModel = models.get(n);
+                                    c.newProvider = providers.get(n);
+                                    c.newChat();
+                                    show("chat");
+                                  })
+                              .show();
+                        else {
+                          c.newModel = models.get(n);
+                          c.newProvider = providers.get(n);
+                          c.model = c.newModel;
+                          update(false);
+                        }
+                      })
+                  .show();
         });
   }
 

@@ -1,17 +1,19 @@
 import hashlib,http.cookiejar,json,secrets,urllib.request,urllib.parse,re
 from pathlib import Path
 root=Path(__file__).resolve().parents[1]
-base='http://192.168.0.50:9119'
 version=re.search(r"versionName '([^']+)'",(root/'app/build.gradle').read_text()).group(1)
 dist=root/'dist'/version
 access=root.parent/'hermes-truenas/dashboard-access.txt'
-password=next(s[10:] for s in access.read_text().splitlines() if s.startswith('Password: '))
+access_lines=access.read_text().splitlines()
+base=next(s.split(': ',1)[1] for s in access_lines if s.startswith('Hermes dashboard: ')).rstrip('/')
+username=next(s[10:] for s in access_lines if s.startswith('Username: '))
+password=next(s[10:] for s in access_lines if s.startswith('Password: '))
 jar=http.cookiejar.CookieJar()
 opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
 def request(path,data=None):
     req=urllib.request.Request(base+path,data=json.dumps(data).encode() if data is not None else None,headers={'Origin':base,'Content-Type':'application/json'})
     return json.load(opener.open(req,timeout=60))
-request('/auth/password-login',{'provider':'basic','username':'vince','password':password})
+request('/auth/password-login',{'provider':'basic','username':username,'password':password})
 files=request('/api/files')
 folder=files['path'].rstrip('/')+'/lcb-hermes/releases/'+version
 download={}

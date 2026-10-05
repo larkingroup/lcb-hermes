@@ -10,6 +10,72 @@ public class ConnectionTest {
   public void acceptsDashboardRootAndExplicitPrivateHttp() {
     assertEquals("nas.local", Endpoint.parse("https://nas.local:9119", false).host());
     assertEquals(9119, Endpoint.parse("http://192.168.0.50:9119", true).port());
+    assertEquals("https://nas.local:9119/", Endpoint.parse("nas.local:9119", false).toString());
+  }
+
+  @Test
+  public void recoversWrongHttpsOnAnApprovedPrivateServer() throws Exception {
+    java.util.List<String> attempts = new java.util.ArrayList<>();
+    okhttp3.HttpUrl resolved =
+        Endpoint.resolve(
+            Endpoint.parse("https://192.168.0.50:9119", true),
+            true,
+            url -> {
+              attempts.add(url.scheme());
+              if (url.isHttps()) throw new javax.net.ssl.SSLException("wrong version number");
+            });
+    assertEquals(java.util.Arrays.asList("https", "http"), attempts);
+    assertEquals("http://192.168.0.50:9119/", resolved.toString());
+  }
+
+  @Test
+  public void explainsPrivateHttpOptInAndDoesNotRetryPublicHttp() throws Exception {
+    try {
+      Endpoint.resolve(
+          Endpoint.parse("https://192.168.0.50:9119", false),
+          false,
+          url -> {
+            if (url.isHttps()) throw new java.io.IOException("TLS failed");
+          });
+      fail("unapproved cleartext transport selected");
+    } catch (java.io.IOException error) {
+      assertTrue(error.getMessage().contains("Tick"));
+    }
+    java.util.List<String> attempts = new java.util.ArrayList<>();
+    try {
+      Endpoint.resolve(
+          Endpoint.parse("https://8.8.8.8:9119", true),
+          true,
+          url -> {
+            attempts.add(url.scheme());
+            throw new java.io.IOException("unreachable");
+          });
+      fail("public HTTP retry allowed");
+    } catch (java.io.IOException expected) {
+      assertEquals(java.util.Collections.singletonList("https"), attempts);
+    }
+  }
+
+  @Test
+  public void neverDowngradesACertificateFailure() throws Exception {
+    java.util.List<String> attempts = new java.util.ArrayList<>();
+    try {
+      Endpoint.resolve(
+          Endpoint.parse("https://192.168.0.50:9119", true),
+          true,
+          url -> {
+            attempts.add(url.scheme());
+            throw new javax.net.ssl.SSLHandshakeException("bad certificate") {
+              {
+                initCause(new java.security.cert.CertificateException("untrusted"));
+              }
+            };
+          });
+      fail("certificate error bypassed");
+    } catch (java.io.IOException error) {
+      assertTrue(error.getMessage().contains("certificate"));
+      assertEquals(java.util.Collections.singletonList("https"), attempts);
+    }
   }
 
   @Test

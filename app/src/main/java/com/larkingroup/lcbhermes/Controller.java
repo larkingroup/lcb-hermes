@@ -199,6 +199,36 @@ final class Controller implements Gateway.Listener {
     status = "signing in";
     connecting = true;
     changed(true);
+    int generation = sessionGeneration;
+    disk.execute(
+        () -> {
+          try {
+            okhttp3.HttpUrl resolved = Endpoint.resolve(base, http);
+            main.post(
+                () -> {
+                  if (generation == sessionGeneration && connecting)
+                    loginAt(name, resolved, username, password, http, callback);
+                });
+          } catch (Exception error) {
+            main.post(
+                () -> {
+                  if (generation != sessionGeneration || !connecting) return;
+                  connecting = false;
+                  status = "offline";
+                  callback.done(null, error.getMessage());
+                  changed(true);
+                });
+          }
+        });
+  }
+
+  private void loginAt(
+      String name,
+      okhttp3.HttpUrl base,
+      String username,
+      String password,
+      boolean http,
+      Gateway.Result callback) {
     String id = UUID.randomUUID().toString();
     JSONObject p =
         obj(
@@ -397,7 +427,7 @@ final class Controller implements Gateway.Listener {
       return;
     }
     sessionGeneration++;
-    if (gateway!=null && gateway.online()) status="connected";
+    if (gateway != null && gateway.online()) status = "connected";
     rows.clear();
     tools.clear();
     requests.clear();
@@ -414,14 +444,14 @@ final class Controller implements Gateway.Listener {
 
   void resume(String id) {
     if (gateway == null || !gateway.online()) return;
-    int generation=++sessionGeneration;
+    int generation = ++sessionGeneration;
     status = "loading chat";
     changed(false);
     gateway.rpc(
         "session.resume",
         obj("session_id", id, "source", "android", "close_on_disconnect", false),
         (v, e) -> {
-          if (generation!=sessionGeneration) return;
+          if (generation != sessionGeneration) return;
           if (e != null) {
             status = "connected";
             notice = e;
@@ -468,7 +498,11 @@ final class Controller implements Gateway.Listener {
 
   void submit(String text) {
     if (text.trim().isEmpty() || submissionPending) return;
-    if (status.equals("loading chat")) { notice="Loading this chat. Your draft is saved."; changed(false); return; }
+    if (status.equals("loading chat")) {
+      notice = "Loading this chat. Your draft is saved.";
+      changed(false);
+      return;
+    }
     if (gateway == null || !gateway.online()) {
       notice = "Connect before sending. Your draft is saved.";
       changed(false);
@@ -482,7 +516,7 @@ final class Controller implements Gateway.Listener {
     submissionPending = true;
     changed(false);
     if (sessionId.isEmpty()) {
-      int generation=++sessionGeneration;
+      int generation = ++sessionGeneration;
       JSONObject params = obj("source", "android", "close_on_disconnect", false);
       if (!newModel.isEmpty())
         try {
@@ -493,7 +527,7 @@ final class Controller implements Gateway.Listener {
           "session.create",
           params,
           (v, e) -> {
-            if (generation!=sessionGeneration) return;
+            if (generation != sessionGeneration) return;
             if (e != null) {
               submissionPending = false;
               notice = e;
@@ -609,6 +643,7 @@ final class Controller implements Gateway.Listener {
         renderSoon();
         break;
       case "message.complete":
+        boolean notifyReply = running && !p.optString("status").equals("interrupted");
         if (stream == null && p.opt("text") instanceof String && !p.optString("text").isEmpty()) {
           stream = obj("role", "assistant", "text", p.optString("text"));
           rows.add(stream);
@@ -621,10 +656,21 @@ final class Controller implements Gateway.Listener {
           }
         running = false;
         submissionPending = false;
+        status = gateway != null && gateway.online() ? "connected" : "offline";
         stream = null;
         notice = p.optString("error", p.optString("warning", ""));
         if (p.optString("status").equals("interrupted")) notice = "Stopped.";
         taskService();
+        if (notifyReply) {
+          String reply = p.optString("text");
+          if (reply.isEmpty())
+            for (int i = rows.size() - 1; i >= 0; i--)
+              if (rows.get(i).optString("role").equals("assistant")) {
+                reply = Protocol.text(rows.get(i));
+                break;
+              }
+          TurnService.reply(context, reply, notice);
+        }
         save();
         changed(true);
         break;

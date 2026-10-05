@@ -299,7 +299,7 @@ final class Gateway {
                 main.post(
                     () -> {
                       if (!disposed)
-                        result.done(null, "Cannot reach the server. Check your connection.");
+                        result.done(null, Endpoint.connectionError(e, base));
                     });
               }
 

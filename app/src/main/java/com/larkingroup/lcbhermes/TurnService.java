@@ -1,10 +1,55 @@
 package com.larkingroup.lcbhermes;
 
+import android.Manifest;
 import android.app.*;
 import android.content.*;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.IBinder;
 
 public final class TurnService extends Service {
+  static void reply(Context context, String text, String error) {
+    NotificationManager manager = context.getSystemService(NotificationManager.class);
+    NotificationChannel channel =
+        new NotificationChannel(
+            "replies", "Hermes replies", NotificationManager.IMPORTANCE_DEFAULT);
+    channel.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
+    manager.createNotificationChannel(channel);
+    if (Build.VERSION.SDK_INT >= 33
+        && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED) return;
+    String preview = text.trim().replaceAll("\\s+", " ");
+    if (preview.isEmpty()) preview = error.isEmpty() ? "Your reply is ready." : error;
+    if (preview.length() > 240) preview = preview.substring(0, 240) + "…";
+    PendingIntent open =
+        PendingIntent.getActivity(
+            context,
+            0,
+            new Intent(context, MainActivity.class)
+                .putExtra("reply", true)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP),
+            PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+    Notification redacted =
+        new Notification.Builder(context, "replies")
+            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setContentTitle("Hermes replied")
+            .setContentText("Open your chat to read the reply.")
+            .build();
+    manager.notify(
+        2,
+        new Notification.Builder(context, "replies")
+            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setContentTitle(error.isEmpty() ? "Hermes replied" : "Hermes task finished")
+            .setContentText(preview)
+            .setStyle(new Notification.BigTextStyle().bigText(preview))
+            .setContentIntent(open)
+            .setAutoCancel(true)
+            .setCategory(Notification.CATEGORY_MESSAGE)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setPublicVersion(redacted)
+            .build());
+  }
+
   @Override
   public void onCreate() {
     super.onCreate();
