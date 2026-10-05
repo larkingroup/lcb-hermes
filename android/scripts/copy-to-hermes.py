@@ -3,7 +3,7 @@ from pathlib import Path
 root=Path(__file__).resolve().parents[1]
 version=re.search(r"versionName '([^']+)'",(root/'app/build.gradle').read_text()).group(1)
 dist=root/'dist'/version
-access=root.parent/'hermes-truenas/dashboard-access.txt'
+access=root.parents[1]/'hermes-truenas/dashboard-access.txt'
 access_lines=access.read_text().splitlines()
 base=next(s.split(': ',1)[1] for s in access_lines if s.startswith('Hermes dashboard: ')).rstrip('/')
 username=next(s[10:] for s in access_lines if s.startswith('Username: '))

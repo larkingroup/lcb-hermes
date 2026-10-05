@@ -10,7 +10,7 @@ call('install','-r',str(root/'app/build/outputs/apk/debug/app-debug.apk'))
 call('install','-r',str(root/'app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk'))
 for setting in ['window_animation_scale','transition_animation_scale','animator_duration_scale']:
     call('shell','settings','put','global',setting,'0',capture_output=True)
-access=(root.parent/'hermes-truenas/dashboard-access.txt').read_text().splitlines()
+access=(root.parents[1]/'hermes-truenas/dashboard-access.txt').read_text().splitlines()
 password=next(s[10:] for s in access if s.startswith('Password: '))
 url=next(s.split(': ',1)[1] for s in access if s.startswith('Hermes dashboard: '))
 username=next(s[10:] for s in access if s.startswith('Username: '))

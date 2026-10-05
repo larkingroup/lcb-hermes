@@ -13,3 +13,14 @@ Android 16 emulator. Hermes 0.21.5 on TrueNAS.
 - 0.3.0: phone/Fold sidebar, search, separate drafts/images; concurrent replies and reconnect.
 - Reply notifications open their own chat. Back gestures and rotation preserve the selection.
 - Signed APK and AAB verified. Fold installed via USB.
+
+0.4.0 PC / Windows x64, Zig 0.16 C compiler; warnings treated as errors.
+
+- Four C suites: protocol/replay, Markdown, endpoints/DPAPI, native chat/menu regressions.
+- Live NAS: native login, WebSocket streaming, browser navigation, saved-chat resume, stats.
+- Live desktop controls: empty defaults, image upload/preview/reply, separate background chat,
+  server-menu return, image metadata after resume, deletion of its own test chat.
+- Android after folder move: unit tests, release lint, signed APK and AAB build passed.
+
+Run C suites with `ctest --test-dir desktop/build -C Release --output-on-failure`.
+Live tests take URL/username/password JSON through stdin; no credentials in tracked fixtures.

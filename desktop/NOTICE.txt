@@ -1,0 +1,7 @@
+lcb-hermes / Larkin Computing Bureau
+
+Classic controls, Markdown rendering and icon adapted from larkingroup/lcb-ai,
+commit 9a52cf5. https://github.com/larkingroup/lcb-ai
+
+cJSON: Dave Gamble and contributors. MIT; see cJSON-LICENSE.txt.
+https://github.com/DaveGamble/cJSON
