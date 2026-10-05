@@ -183,6 +183,7 @@ final class Gateway {
                     public void onFailure(WebSocket ws, Throwable t, Response response) {
                       main.post(
                           () -> {
+                            if (disposed) return;
                             if (!online)
                               result.done(null, "Connection failed. Check the server and network.");
                             lost("Connection lost. Your task stays on the server.");
@@ -298,8 +299,7 @@ final class Gateway {
               public void onFailure(Call call, IOException e) {
                 main.post(
                     () -> {
-                      if (!disposed)
-                        result.done(null, Endpoint.connectionError(e, base));
+                      if (!disposed) result.done(null, Endpoint.connectionError(e, base));
                     });
               }
 

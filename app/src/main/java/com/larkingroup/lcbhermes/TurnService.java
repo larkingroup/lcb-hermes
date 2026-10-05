@@ -70,7 +70,9 @@ public final class TurnService extends Service {
         PendingIntent.getActivity(
             this,
             0,
-            new Intent(this, MainActivity.class),
+            new Intent(this, MainActivity.class)
+                .putExtra("task", true)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP),
             PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     PendingIntent stop =
         PendingIntent.getService(

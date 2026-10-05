@@ -40,6 +40,22 @@ public final class MainActivity extends Activity implements Controller.Observer 
   private boolean followTail = true;
   private boolean modelPickerPending;
   private Sheet modelDialog;
+  private android.window.OnBackInvokedCallback backCallback;
+  private boolean backRegistered, started, statsLoading;
+  private final Handler screenHandler = new Handler(Looper.getMainLooper());
+  private LinearLayout statsRows;
+  private TextView statsNotice;
+  private int statsGeneration;
+  private Gateway statsSource;
+  private final Runnable pollStats =
+      new Runnable() {
+        @Override
+        public void run() {
+          if (!started || !page.equals("server")) return;
+          refreshServerStats();
+          screenHandler.postDelayed(this, 5000);
+        }
+      };
   private byte[] pendingExport;
   private static final int PICK_FILE = 2, SAVE_FILE = 3, VOICE = 4;
 
@@ -63,7 +79,59 @@ public final class MainActivity extends Activity implements Controller.Observer 
                 })
             .build();
     build();
+  }
+
+  @Override
+  protected void onStart() {
+    super.onStart();
+    started = true;
     c.attach(this);
+    updateBackHandler();
+    if (page.equals("server")) startServerStats();
+  }
+
+  @Override
+  protected void onStop() {
+    started = false;
+    stopServerStats();
+    c.detach(this);
+    super.onStop();
+  }
+
+  private boolean navigateBack() {
+    if (!page.equals("chat")) {
+      show("chat");
+      return true;
+    }
+    if (sessionsExpanded) {
+      sessionsExpanded = false;
+      if (sessionPane != null) sessionPane.removeAllViews();
+      updateBackHandler();
+      return true;
+    }
+    return false;
+  }
+
+  private void updateBackHandler() {
+    if (Build.VERSION.SDK_INT < 33) return;
+    if (backCallback == null) backCallback = () -> navigateBack();
+    boolean needed = !page.equals("chat") || sessionsExpanded;
+    if (needed && !backRegistered) {
+      getOnBackInvokedDispatcher()
+          .registerOnBackInvokedCallback(
+              android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, backCallback);
+      backRegistered = true;
+    } else if (!needed && backRegistered) {
+      getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);
+      backRegistered = false;
+    }
+  }
+
+  @Override
+  @android.annotation.SuppressLint(
+      "GestureBackNavigation") // Android 8–12 fallback; newer devices use the dispatcher above.
+  public void onBackPressed() {
+    if (!navigateBack()) super.onBackPressed();
   }
 
   @Override
@@ -76,6 +144,9 @@ public final class MainActivity extends Activity implements Controller.Observer 
   @Override
   protected void onDestroy() {
     c.detach(this);
+    stopServerStats();
+    if (Build.VERSION.SDK_INT >= 33 && backRegistered)
+      getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);
     if (modelDialog != null) modelDialog.dismiss();
     super.onDestroy();
   }
@@ -84,7 +155,8 @@ public final class MainActivity extends Activity implements Controller.Observer 
   protected void onNewIntent(Intent intent) {
     super.onNewIntent(intent);
     setIntent(intent);
-    if (intent.getBooleanExtra("reply", false)) show("chat");
+    if (intent.getBooleanExtra("reply", false) || intent.getBooleanExtra("task", false))
+      show("chat");
   }
 
   @Override
@@ -280,6 +352,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
   }
 
   private void show(String name) {
+    stopServerStats();
     if (name.equals("sessions")) {
       sessionsExpanded = true;
       name = "chat";
@@ -292,9 +365,12 @@ public final class MainActivity extends Activity implements Controller.Observer 
     sessionPane = null;
     attachmentTray = null;
     serverStatus = null;
+    statsRows = null;
+    statsNotice = null;
     if (page.equals("server")) server();
     else chat();
     update(false);
+    updateBackHandler();
   }
 
   private void chat() {
@@ -413,6 +489,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
     sessionsExpanded = !sessionsExpanded;
     if (sessionsExpanded) renderSessionPicker();
     else if (sessionPane != null) sessionPane.removeAllViews();
+    updateBackHandler();
   }
 
   private void renderSessionPicker() {
@@ -661,20 +738,23 @@ public final class MainActivity extends Activity implements Controller.Observer 
       chatScroll.post(() -> chatScroll.fullScroll(View.FOCUS_DOWN));
   }
 
-  private void menu() {
-    String[] options = {
-      c.gateway != null && c.gateway.online() ? "reconnect" : "connect",
-      "servers",
-      "light / dark",
-      "export chat",
-      "open dashboard",
-      "forget this server",
-      "about"
-    };
+  private void about() {
     new Sheet.Builder(this)
-        .setTitle("lcb-hermes")
+        .setTitle("lcb-hermes 0.2.1")
+        .setMessage(
+            "A small client for Hermes.\n\n"
+                + "No ads. No purchases. No analytics.\n\n"
+                + "Messages go to your server. Voice input uses Android's speech provider.")
+        .setPositiveButton("okay", null)
+        .setNeutralButton("licenses", (x, y) -> licenses())
+        .show();
+  }
+
+  private void menu() {
+    new Sheet.Builder(this)
+        .setTitle("server options")
         .setItems(
-            options,
+            new String[] {"reconnect", "export chat", "forget this server", "licenses"},
             (d, n) -> {
               switch (n) {
                 case 0:
@@ -685,18 +765,9 @@ public final class MainActivity extends Activity implements Controller.Observer 
                   }
                   break;
                 case 1:
-                  profiles();
-                  break;
-                case 2:
-                  c.theme(theme.equals("dark") ? "light" : "dark");
-                  break;
-                case 3:
                   exportChat();
                   break;
-                case 4:
-                  if (c.profile() != null) openLink(c.profile().optString("url"));
-                  break;
-                case 5:
+                case 2:
                   if (c.profile() != null)
                     new Sheet.Builder(this)
                         .setTitle("forget this server?")
@@ -707,17 +778,9 @@ public final class MainActivity extends Activity implements Controller.Observer 
                         .setPositiveButton("forget", (x, y) -> c.forget())
                         .show();
                   break;
-                case 6:
-                  new Sheet.Builder(this)
-                      .setTitle("lcb-hermes 0.2.0")
-                      .setMessage(
-                          "A small client for Hermes.\n\n"
-                              + "No ads. No purchases. No analytics.\n\n"
-                              + "Messages go to your server. OpenAI stays there. Voice input uses"
-                              + " Android's speech provider.")
-                      .setPositiveButton("okay", null)
-                      .setNeutralButton("licenses", (x, y) -> licenses())
-                      .show();
+                case 3:
+                  licenses();
+                  break;
               }
             })
         .show();
@@ -1163,17 +1226,64 @@ public final class MainActivity extends Activity implements Controller.Observer 
     update(false);
   }
 
+  private Button module(String glyph, String title, String description, Runnable click) {
+    Button b = button(title, click);
+    b.setContentDescription(description);
+    b.setTextSize(11);
+    b.setPadding(dp(4), dp(10), dp(4), dp(8));
+    b.setMinHeight(dp(62));
+    b.setGravity(Gravity.CENTER);
+    Glyph icon = new Glyph(glyph, ink);
+    icon.setBounds(0, 0, dp(22), dp(22));
+    b.setCompoundDrawables(null, icon, null, null);
+    b.setCompoundDrawablePadding(dp(6));
+    b.setBackground(
+        new RippleDrawable(
+            android.content.res.ColorStateList.valueOf(blue),
+            surface(Color.TRANSPARENT, 8, false),
+            null));
+    return b;
+  }
+
   private void server() {
     LinearLayout top = row();
     top.addView(iconButton("back", "back to chat", () -> show("chat")));
     weighted(top, text("server", 18, ink));
     top.addView(iconButton("more", "settings", this::menu));
     add(content, top);
-    gap(content, 14);
+    ScrollView scroll = new ScrollView(this);
+    LinearLayout body = column();
+    scroll.addView(body);
+    content.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+    LinearLayout modules = row();
+    modules.setPadding(dp(4), dp(4), dp(4), dp(4));
+    modules.setBackground(surface(paper, 12, true));
+    weighted(modules, module("server", "servers", "choose server", this::profiles));
+    weighted(
+        modules,
+        module(
+            "dashboard",
+            "dashboard",
+            "open dashboard",
+            () -> {
+              if (c.profile() == null) loginDialog();
+              else openLink(c.profile().optString("url"));
+            }));
+    boolean dark = theme.equals("dark");
+    weighted(
+        modules,
+        module(
+            dark ? "sun" : "moon",
+            dark ? "light" : "dark",
+            "toggle light or dark",
+            () -> c.theme(dark ? "light" : "dark")));
+    weighted(modules, module("about", "about", "about lcb-hermes", this::about));
+    add(body, modules);
+    gap(body, 12);
     LinearLayout card = column();
-    card.setPadding(dp(12), dp(14), dp(12), dp(14));
+    card.setPadding(dp(8), dp(10), dp(8), dp(10));
     card.setBackground(surface(paper, 12, true));
-    add(content, card);
+    add(body, card);
     JSONObject p = c.profile();
     if (p == null) {
       add(card, text("Connect your Hermes server", 18, ink));
@@ -1186,27 +1296,88 @@ public final class MainActivity extends Activity implements Controller.Observer 
     add(card, label(p.optString("url")));
     serverStatus = label(c.status);
     add(card, serverStatus);
-    gap(card, 12);
-    add(
-        card,
-        button(
-            "reconnect",
-            () -> {
-              c.close();
-              c.connectSaved();
-            }));
-    gap(card, 6);
-    add(card, button("servers", this::profiles));
-    gap(card, 6);
-    add(card, button("open dashboard", () -> openLink(p.optString("url"))));
-    gap(content, 16);
-    add(
-        content,
-        text(
-            "Hermes works here. Model accounts, browser tools, and other settings live in the"
-                + " dashboard.",
-            14,
-            muted));
+    gap(body, 8);
+    LinearLayout statsHeader = row();
+    TextView heading = text("server stats", 16, ink);
+    heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+    weighted(statsHeader, heading);
+    statsHeader.addView(iconButton("refresh", "refresh server stats", this::refreshServerStats));
+    add(body, statsHeader);
+    statsNotice = label("loading…");
+    statsNotice.setContentDescription("server stats status");
+    add(body, statsNotice);
+    statsRows = column();
+    add(body, statsRows);
+    gap(body, 8);
+    add(body, label("System figures are reported by Hermes. Process memory is Hermes itself."));
+    gap(body, 8);
+    if (started) startServerStats();
+  }
+
+  private void startServerStats() {
+    screenHandler.removeCallbacks(pollStats);
+    refreshServerStats();
+    screenHandler.postDelayed(pollStats, 5000);
+  }
+
+  private void stopServerStats() {
+    screenHandler.removeCallbacks(pollStats);
+    statsGeneration++;
+    statsLoading = false;
+  }
+
+  private void refreshServerStats() {
+    if (!started || !page.equals("server") || statsRows == null) return;
+    Gateway source = c.gateway;
+    if (source == null || !source.online()) {
+      statsNotice.setText("Connect to read server stats.");
+      return;
+    }
+    if (statsLoading && statsSource == source) return;
+    statsLoading = true;
+    statsSource = source;
+    int generation = ++statsGeneration;
+    source.rest(
+        "/api/system/stats",
+        null,
+        (v, e) -> {
+          if (!started
+              || !page.equals("server")
+              || generation != statsGeneration
+              || source != c.gateway) return;
+          statsLoading = false;
+          if (e != null) {
+            statsNotice.setText("Stats unavailable. " + e);
+            return;
+          }
+          statsRows.removeAllViews();
+          Map<String, LinkedHashMap<String, String>> sections =
+              ServerStats.sections(v, System.currentTimeMillis() / 1000);
+          for (Map.Entry<String, LinkedHashMap<String, String>> section : sections.entrySet()) {
+            LinearLayout panel = column();
+            panel.setPadding(dp(6), dp(6), dp(6), dp(8));
+            panel.setBackground(surface(paper, 10, true));
+            TextView cap = text(section.getKey(), 15, ink);
+            cap.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+            add(panel, cap);
+            for (Map.Entry<String, String> item : section.getValue().entrySet()) {
+              LinearLayout metric = row();
+              metric.setGravity(Gravity.TOP);
+              weighted(metric, text(item.getKey(), 13, muted));
+              TextView value = text(item.getValue(), 13, ink);
+              value.setGravity(Gravity.END);
+              value.setTextIsSelectable(true);
+              weighted(metric, value);
+              add(panel, metric);
+            }
+            add(statsRows, panel);
+            gap(statsRows, 8);
+          }
+          statsNotice.setText(
+              sections.isEmpty()
+                  ? "Stats unavailable on this server."
+                  : "live · refreshes every 5 seconds");
+        });
   }
 
   private String pretty(JSONObject value) {
