@@ -754,7 +754,10 @@ final class Controller implements Gateway.Listener {
       return;
     }
     String id = event.optString("session_id");
-    if (!id.isEmpty() && !id.equals(sessionId) && !id.equals(storedId)) return;
+    if (!type.equals("sessions.changed")
+        && (id.isEmpty()
+            || (sessionId.isEmpty() && storedId.isEmpty())
+            || (!id.equals(sessionId) && !id.equals(storedId)))) return;
     if (event.has("seq")) {
       long seq = event.optLong("seq");
       String key = id + ":" + epoch;
@@ -864,6 +867,12 @@ final class Controller implements Gateway.Listener {
 
   @Override
   public void request(JSONObject r) {
+    JSONObject params = r.optJSONObject("params");
+    String id = params == null ? "" : params.optString("session_id");
+    if (!id.isEmpty() && !id.equals(sessionId) && !id.equals(storedId)) {
+      if (gateway != null) gateway.unsupported(r);
+      return;
+    }
     String method = r.optString("method");
     if (method.equals("approval") || method.equals("clarify")) {
       requests.put(r.optString("id"), r);

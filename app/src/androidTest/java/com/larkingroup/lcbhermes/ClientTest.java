@@ -83,6 +83,167 @@ public class ClientTest {
   }
 
   @Test
+  public void serverBackKeepsWorkingChat() throws Exception {
+    Assume.assumeTrue("emulator only", Build.MODEL.contains("sdk"));
+    until(() -> c().loaded, 15);
+    ui(() -> c().demo());
+    // A notification or launcher entry must not create a second, stale chat screen.
+    ui(
+        () ->
+            activity
+                .getActivity()
+                .startActivity(new Intent(activity.getActivity(), MainActivity.class)));
+    assertTrue(device.wait(Until.hasObject(By.desc("message Hermes")), 5000));
+    ui(
+        () -> {
+          c().newChat();
+          c().sessionId = "current-runtime";
+          c().storedId = "current-stored";
+          c().rows.add(obj("role", "user", "text", "current task"));
+          c().changed(true);
+          c().event(obj("type", "message.start", "session_id", c().sessionId, "payload", obj()));
+        });
+    assertTrue(device.wait(Until.hasObject(By.text("current task")), 5000));
+    device.findObject(By.desc("server and connection")).click();
+    if (device.findObject(By.desc("about lcb-hermes")) != null)
+      device.findObject(By.desc("about lcb-hermes")).click();
+    else {
+      device.findObject(By.desc("settings")).click();
+      device.findObject(By.text("about")).click();
+    }
+    assertTrue(
+        device.wait(
+            Until.hasObject(By.text(java.util.regex.Pattern.compile("lcb-hermes 0\\..*"))), 5000));
+    device.pressBack();
+    device.pressBack();
+    try {
+      assertTrue(
+          "back must return to the current chat, not an older activity",
+          device.wait(Until.hasObject(By.text("current task")), 5000));
+      assertEquals("current-runtime", c().sessionId);
+      assertTrue("navigation must not stop the active task", c().running);
+      ui(
+          () -> {
+            c().event(
+                    obj(
+                        "type",
+                        "session.info",
+                        "session_id",
+                        "old-runtime",
+                        "payload",
+                        obj("stored_session_id", "old-stored", "title", "old chat")));
+            c().event(
+                    obj(
+                        "type",
+                        "session.info",
+                        "payload",
+                        obj("stored_session_id", "old-stored", "title", "old chat")));
+            c().request(
+                    obj(
+                        "id",
+                        "old-request",
+                        "method",
+                        "clarify",
+                        "params",
+                        obj("session_id", "old-runtime", "question", "old question")));
+          });
+      assertEquals("current-stored", c().storedId);
+      assertTrue(c().requests.isEmpty());
+      device.findObject(By.desc("server and connection")).click();
+      device.findObject(By.desc("about lcb-hermes")).click();
+      assertTrue(device.wait(Until.hasObject(By.text("lcb-hermes 0.2.1")), 3000));
+      backGesture();
+      assertTrue(device.wait(Until.gone(By.text("lcb-hermes 0.2.1")), 3000));
+      assertNotNull(device.findObject(By.desc("about lcb-hermes")));
+      backGesture();
+      assertTrue(
+          "edge back must return to the working chat",
+          device.wait(Until.hasObject(By.text("current task")), 5000));
+      android.app.ActivityManager manager =
+          activity.getActivity().getSystemService(android.app.ActivityManager.class);
+      assertEquals(
+          "only one chat activity", 1, manager.getAppTasks().get(0).getTaskInfo().numActivities);
+      capture("server-back-current-chat");
+    } finally {
+      ui(
+          () ->
+              c().event(
+                      obj(
+                          "type",
+                          "message.complete",
+                          "session_id",
+                          "current-runtime",
+                          "payload",
+                          obj("status", "interrupted"))));
+    }
+  }
+
+  private void backGesture() throws Exception {
+    assertTrue(
+        device.swipe(
+            12,
+            device.getDisplayHeight() / 2,
+            device.getDisplayWidth() * 2 / 3,
+            device.getDisplayHeight() / 2,
+            60));
+    device.waitForIdle();
+  }
+
+  @Test
+  public void serverStatsAndModulesKeepDraft() throws Exception {
+    Assume.assumeTrue("emulator only", Build.MODEL.contains("sdk"));
+    until(() -> c().loaded, 15);
+    File fixture = new File(activity.getActivity().getFilesDir(), "fixture.json");
+    Assume.assumeTrue(fixture.exists());
+    JSONObject access =
+        new JSONObject(
+            new String(java.nio.file.Files.readAllBytes(fixture.toPath()), StandardCharsets.UTF_8));
+    assertTrue(fixture.delete());
+    CountDownLatch login = new CountDownLatch(1);
+    String[] error = {null};
+    ui(
+        () ->
+            c().login(
+                    "Hermes",
+                    access.optString("url"),
+                    access.optString("username"),
+                    access.optString("password"),
+                    true,
+                    (v, e) -> {
+                      error[0] = e;
+                      login.countDown();
+                    }));
+    assertTrue(login.await(30, TimeUnit.SECONDS));
+    assertNull(error[0]);
+    until(() -> c().gateway != null && c().gateway.online(), 15);
+    ui(
+        () -> {
+          c().newChat();
+          c().setDraft("keep this draft");
+        });
+    device.findObject(By.desc("server and connection")).click();
+    assertTrue(device.wait(Until.hasObject(By.text("CPU")), 10000));
+    assertNotNull(device.findObject(By.desc("about lcb-hermes")));
+    assertNotNull(device.findObject(By.desc("toggle light or dark")));
+    capture("server-modules-light");
+    device.findObject(By.desc("toggle light or dark")).click();
+    assertTrue(device.wait(Until.hasObject(By.text("CPU")), 10000));
+    capture("server-modules-dark");
+    device.findObject(By.desc("toggle light or dark")).click();
+    device.findObject(By.desc("about lcb-hermes")).click();
+    backGesture();
+    backGesture();
+    assertTrue(device.wait(Until.hasObject(By.desc("message Hermes")), 5000));
+    assertEquals("keep this draft", c().draft);
+    assertEquals("", c().storedId);
+    device.findObject(By.desc("choose chat")).click();
+    assertTrue(device.wait(Until.hasObject(By.text("find a chat")), 3000));
+    backGesture();
+    assertTrue(device.wait(Until.gone(By.text("find a chat")), 3000));
+    assertEquals("keep this draft", c().draft);
+  }
+
+  @Test
   public void chatDesignAndImageAttachment() throws Exception {
     Assume.assumeTrue("emulator only", Build.MODEL.contains("sdk"));
     until(() -> c().loaded, 15);

@@ -64,6 +64,41 @@ final class Glyph extends Drawable {
         c.drawLine(7, 7, 17, 17, p);
         c.drawLine(17, 7, 7, 17, p);
         break;
+      case "about":
+        c.drawCircle(12, 12, 9, p);
+        c.drawLine(12, 11, 12, 17, p);
+        p.setStyle(Paint.Style.FILL);
+        c.drawCircle(12, 7, 1, p);
+        break;
+      case "sun":
+        c.drawCircle(12, 12, 4, p);
+        for (int i = 0; i < 8; i++) {
+          double angle = i * Math.PI / 4;
+          c.drawLine(
+              12 + (float) Math.cos(angle) * 7,
+              12 + (float) Math.sin(angle) * 7,
+              12 + (float) Math.cos(angle) * 10,
+              12 + (float) Math.sin(angle) * 10,
+              p);
+        }
+        break;
+      case "moon":
+        path.moveTo(17, 3);
+        path.cubicTo(3, 0, 0, 20, 14, 21);
+        path.cubicTo(19, 21, 22, 17, 22, 13);
+        path.cubicTo(12, 18, 9, 8, 17, 3);
+        c.drawPath(path, p);
+        break;
+      case "dashboard":
+        c.drawRoundRect(3, 4, 21, 20, 2, 2, p);
+        c.drawLine(3, 9, 21, 9, p);
+        c.drawLine(9, 9, 9, 20, p);
+        break;
+      case "refresh":
+        c.drawArc(4, 4, 20, 20, 35, 290, false, p);
+        c.drawLine(20, 4, 20, 10, p);
+        c.drawLine(14, 10, 20, 10, p);
+        break;
       default:
         p.setStyle(Paint.Style.FILL);
         for (int x = 5; x <= 19; x += 7) c.drawCircle(x, 12, 1.3f, p);
