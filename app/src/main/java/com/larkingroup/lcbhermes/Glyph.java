@@ -27,6 +27,16 @@ final class Glyph extends Drawable {
     p.setStrokeJoin(Paint.Join.ROUND);
     Path path = new Path();
     switch (name) {
+      case "sidebar":
+        c.drawRoundRect(3, 4, 21, 20, 1, 1, p);
+        c.drawLine(10, 4, 10, 20, p);
+        c.drawLine(6, 8, 7, 8, p);
+        c.drawLine(6, 12, 7, 12, p);
+        break;
+      case "new":
+        c.drawLine(12, 5, 12, 19, p);
+        c.drawLine(5, 12, 19, 12, p);
+        break;
       case "server":
         c.drawRoundRect(3, 4, 21, 16, 1.5f, 1.5f, p);
         c.drawLine(12, 16, 12, 20, p);

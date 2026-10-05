@@ -2,12 +2,15 @@
 
 A small native Android client for Hermes. No ads. No purchases.
 
-<img src="branding/phone.png" width="280" alt="lcb-hermes">
+<img src="branding/phone.png" width="220" alt="lcb-hermes chats">
+<img src="branding/fold.png" width="400" alt="lcb-hermes on a wide screen">
 
 Connect with the Hermes dashboard URL and dashboard login. Models stay on the server.
 Private HTTP needs the checkbox; the client can find the right protocol. No ports to add.
 
-Chat, an inline session picker, image previews. The computer icon opens server stats and a small module menu.
+Chats in a sidebar: tucked away on phones, beside the conversation on wider screens.
+Separate drafts and image previews. Tasks keep going when you switch chats.
+The computer icon opens server stats and a small module menu.
 Tools, approvals, voice input, export. Light or dark.
 
 Build: `gradlew assembleDebug` with an Android SDK and JDK 17+.
