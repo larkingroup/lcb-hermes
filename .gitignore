@@ -1,0 +1,15 @@
+.gradle/
+.toolchain/
+.test-deps/
+.signing/
+local.properties
+**/build/
+reference-lcb-ai/
+gateway-contract.reference.ts
+*.log
+captures/
+test-access.json
+dist/
+scripts/probe-hermes.py
+scripts/refine.py
+scripts/collect-notices.py
