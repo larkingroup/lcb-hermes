@@ -8,7 +8,7 @@ import android.os.Build;
 import android.os.IBinder;
 
 public final class TurnService extends Service {
-  static void reply(Context context, String text, String error) {
+  static void reply(Context context, String text, String error, String profile, String session) {
     NotificationManager manager = context.getSystemService(NotificationManager.class);
     NotificationChannel channel =
         new NotificationChannel(
@@ -27,6 +27,15 @@ public final class TurnService extends Service {
             0,
             new Intent(context, MainActivity.class)
                 .putExtra("reply", true)
+                .putExtra("session", session)
+                .putExtra("profile", profile)
+                .setData(
+                    new android.net.Uri.Builder()
+                        .scheme("lcb-hermes")
+                        .authority("chat")
+                        .appendPath(profile)
+                        .appendPath(session)
+                        .build())
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP),
             PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     Notification redacted =
@@ -36,6 +45,7 @@ public final class TurnService extends Service {
             .setContentText("Open your chat to read the reply.")
             .build();
     manager.notify(
+        "reply:" + profile + ":" + session,
         2,
         new Notification.Builder(context, "replies")
             .setSmallIcon(android.R.drawable.stat_notify_chat)
@@ -63,22 +73,28 @@ public final class TurnService extends Service {
   public int onStartCommand(Intent intent, int flags, int startId) {
     Controller c = ((HermesApp) getApplication()).controller;
     if (intent != null && "stop".equals(intent.getAction())) {
-      c.stop();
+      c.stop(
+          intent.getStringExtra("session") == null
+              ? c.workingSession()
+              : intent.getStringExtra("session"));
       return START_NOT_STICKY;
     }
+    String session = c.workingSession();
     PendingIntent open =
         PendingIntent.getActivity(
             this,
             0,
             new Intent(this, MainActivity.class)
                 .putExtra("task", true)
+                .putExtra("session", session)
+                .putExtra("profile", c.profileId)
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP),
             PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     PendingIntent stop =
         PendingIntent.getService(
             this,
             1,
-            new Intent(this, TurnService.class).setAction("stop"),
+            new Intent(this, TurnService.class).setAction("stop").putExtra("session", session),
             PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     startForeground(
         1,
@@ -91,7 +107,7 @@ public final class TurnService extends Service {
             .setVisibility(Notification.VISIBILITY_PRIVATE)
             .addAction(new Notification.Action.Builder(null, "stop", stop).build())
             .build());
-    if (!c.running) stopSelf();
+    if (!c.anyRunning()) stopSelf();
     return START_NOT_STICKY;
   }
 

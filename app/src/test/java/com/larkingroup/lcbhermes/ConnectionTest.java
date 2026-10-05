@@ -9,7 +9,7 @@ public class ConnectionTest {
   @Test
   public void acceptsDashboardRootAndExplicitPrivateHttp() {
     assertEquals("nas.local", Endpoint.parse("https://nas.local:9119", false).host());
-    assertEquals(9119, Endpoint.parse("http://192.168.0.50:9119", true).port());
+    assertEquals(9119, Endpoint.parse("http://192.168.56.10:9119", true).port());
     assertEquals("https://nas.local:9119/", Endpoint.parse("nas.local:9119", false).toString());
   }
 
@@ -18,21 +18,21 @@ public class ConnectionTest {
     java.util.List<String> attempts = new java.util.ArrayList<>();
     okhttp3.HttpUrl resolved =
         Endpoint.resolve(
-            Endpoint.parse("https://192.168.0.50:9119", true),
+            Endpoint.parse("https://192.168.56.10:9119", true),
             true,
             url -> {
               attempts.add(url.scheme());
               if (url.isHttps()) throw new javax.net.ssl.SSLException("wrong version number");
             });
     assertEquals(java.util.Arrays.asList("https", "http"), attempts);
-    assertEquals("http://192.168.0.50:9119/", resolved.toString());
+    assertEquals("http://192.168.56.10:9119/", resolved.toString());
   }
 
   @Test
   public void explainsPrivateHttpOptInAndDoesNotRetryPublicHttp() throws Exception {
     try {
       Endpoint.resolve(
-          Endpoint.parse("https://192.168.0.50:9119", false),
+          Endpoint.parse("https://192.168.56.10:9119", false),
           false,
           url -> {
             if (url.isHttps()) throw new java.io.IOException("TLS failed");
@@ -61,7 +61,7 @@ public class ConnectionTest {
     java.util.List<String> attempts = new java.util.ArrayList<>();
     try {
       Endpoint.resolve(
-          Endpoint.parse("https://192.168.0.50:9119", true),
+          Endpoint.parse("https://192.168.56.10:9119", true),
           true,
           url -> {
             attempts.add(url.scheme());
@@ -82,7 +82,7 @@ public class ConnectionTest {
   public void rejectsCredentialsPathsAndUnapprovedHttp() {
     for (String s :
         new String[] {
-          "http://192.168.0.50:9119",
+          "http://192.168.56.10:9119",
           "https://me:secret@nas/",
           "https://nas/api/ws",
           "https://nas/?token=a",
@@ -104,7 +104,7 @@ public class ConnectionTest {
           "10.0.0.1",
           "172.16.0.1",
           "172.31.255.254",
-          "192.168.0.50",
+          "192.168.56.10",
           "100.64.0.1",
           "100.127.255.254",
           "fd7a:115c:a1e0::1"

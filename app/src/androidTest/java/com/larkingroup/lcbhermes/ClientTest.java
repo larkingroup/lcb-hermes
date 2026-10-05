@@ -83,6 +83,264 @@ public class ClientTest {
   }
 
   @Test
+  public void backgroundChatSurvivesRestore() throws Exception {
+    Assume.assumeTrue("emulator only", Build.MODEL.contains("sdk"));
+    until(() -> c().loaded, 15);
+    ui(
+        () -> {
+          c().demo();
+          c().data =
+              obj(
+                  "profiles",
+                  new JSONArray().put(obj("id", "local-task-state")),
+                  "active",
+                  "local-task-state",
+                  "theme",
+                  "light");
+          c().profileId = "local-task-state";
+          c().sessionId = "alpha-runtime";
+          c().storedId = "alpha-stored";
+          c().title = "alpha";
+          c().rows.clear();
+          c().rows.add(obj("role", "user", "text", "alpha task"));
+          c().event(obj("type", "message.start", "session_id", "alpha-runtime", "payload", obj()));
+          c().setDraft("alpha draft");
+          c().newChat();
+          c().setDraft("new chat draft");
+          c().save();
+        });
+    c().disk.submit(() -> {}).get(10, TimeUnit.SECONDS);
+    JSONObject saved = c().store.read();
+    ui(
+        () -> {
+          c().close();
+          c().data = saved;
+          c().restore();
+        });
+    assertEquals("new chat draft", c().draft);
+    assertEquals("", c().storedId);
+    assertTrue("saved background task is watched after process restoration", c().anyRunning());
+    assertEquals("alpha draft", ChatDrafts.read(c().profile(), "alpha-stored").optString("text"));
+    ui(
+        () -> {
+          c().event(
+                  obj(
+                      "type",
+                      "session.info",
+                      "payload",
+                      obj("stored_session_id", "unrelated", "title", "wrong")));
+          c().request(
+                  obj(
+                      "id",
+                      "alpha-question",
+                      "method",
+                      "clarify",
+                      "params",
+                      obj("session_id", "alpha-runtime", "question", "which file?")));
+        });
+    assertEquals("", c().storedId);
+    assertTrue("a background question cannot enter the current chat", c().requests.isEmpty());
+    assertEquals("answer needed", c().chatBadge("alpha-stored"));
+    ui(
+        () ->
+            c().event(
+                    obj(
+                        "type",
+                        "message.complete",
+                        "session_id",
+                        "alpha-runtime",
+                        "payload",
+                        obj("text", "alpha reply", "status", "completed"))));
+    assertFalse(c().anyRunning());
+    assertEquals("reply", c().chatBadge("alpha-stored"));
+    assertEquals("new chat draft", c().draft);
+    assertEquals("", c().storedId);
+    assertFalse(c().export().contains("alpha reply"));
+    ui(() -> c().demo());
+  }
+
+  @Test
+  public void sidebarPreview() throws Exception {
+    Assume.assumeTrue("emulator only", Build.MODEL.contains("sdk"));
+    until(() -> c().loaded, 15);
+    ui(
+        () -> {
+          c().demo();
+          c().theme("light");
+          c().storedId = "preview-docs";
+          c().sessionId = "preview-docs-runtime";
+          c().title = "a little help";
+          c().sessions =
+              new JSONArray()
+                  .put(obj("id", "preview-docs", "title", "a little help"))
+                  .put(obj("id", "preview-web", "title", "read the web"))
+                  .put(obj("id", "preview-build", "title", "build something small"))
+                  .put(obj("id", "preview-notes", "title", "notes for later"))
+                  .put(obj("id", "preview-photos", "title", "look at these photos"))
+                  .put(obj("id", "preview-terminal", "title", "a bit of terminal work"));
+          c().changed(true);
+        });
+    assertTrue(device.wait(Until.hasObject(By.desc("message Hermes")), 5000));
+    boolean wide = activity.getActivity().getResources().getConfiguration().screenWidthDp >= 600;
+    if (!wide) device.findObject(By.desc("choose chat")).click();
+    assertTrue(device.wait(Until.hasObject(By.desc("find a chat")), 3000));
+    assertNotNull(device.findObject(By.desc("a little help, open chat")));
+    capture(wide ? "sidebar-fold-light" : "sidebar-phone-light");
+    device.findObject(By.desc("find a chat")).setText("photos");
+    assertTrue(device.wait(Until.hasObject(By.desc("look at these photos, open chat")), 3000));
+    assertNull(device.findObject(By.desc("read the web, open chat")));
+    device.findObject(By.desc("find a chat")).setText("");
+    boolean[] ime = {false};
+    ui(
+        () ->
+            ime[0] =
+                activity
+                    .getActivity()
+                    .getWindow()
+                    .getDecorView()
+                    .getRootWindowInsets()
+                    .isVisible(android.view.WindowInsets.Type.ime()));
+    if (ime[0]) device.pressBack();
+    if (!wide) {
+      backGesture();
+      assertTrue(device.wait(Until.gone(By.desc("find a chat")), 3000));
+      assertTrue(device.wait(Until.hasObject(By.desc("message Hermes")), 3000));
+      capture("sidebar-phone-chat");
+      device.findObject(By.desc("choose chat")).click();
+    }
+    ui(() -> c().theme("dark"));
+    assertTrue(device.wait(Until.hasObject(By.desc("find a chat")), 3000));
+    capture(wide ? "sidebar-fold-dark" : "sidebar-phone-dark");
+    ui(() -> c().theme("light"));
+  }
+
+  @Test
+  public void sidebarKeepsSeparateChatsAndRoutesReplies() throws Exception {
+    Assume.assumeTrue("emulator only", Build.MODEL.contains("sdk"));
+    until(() -> c().loaded, 15);
+    File fixture = new File(activity.getActivity().getFilesDir(), "fixture.json");
+    Assume.assumeTrue(fixture.exists());
+    JSONObject access =
+        new JSONObject(
+            new String(java.nio.file.Files.readAllBytes(fixture.toPath()), StandardCharsets.UTF_8));
+    assertTrue(fixture.delete());
+    ui(() -> c().demo());
+    CountDownLatch login = new CountDownLatch(1);
+    String[] error = {null};
+    ui(
+        () ->
+            c().login(
+                    "Hermes",
+                    access.optString("url"),
+                    access.optString("username"),
+                    access.optString("password"),
+                    true,
+                    (v, e) -> {
+                      error[0] = e;
+                      login.countDown();
+                    }));
+    assertTrue(login.await(30, TimeUnit.SECONDS));
+    assertNull(error[0]);
+    until(
+        () -> c().gateway != null && c().gateway.online() && !c().status.equals("loading chat"),
+        20);
+    InstrumentationRegistry.getInstrumentation()
+        .getUiAutomation()
+        .executeShellCommand(
+            "pm grant com.larkingroup.lcbhermes android.permission.POST_NOTIFICATIONS")
+        .close();
+    NotificationManager manager =
+        activity.getActivity().getSystemService(NotificationManager.class);
+    manager.cancelAll();
+    ui(
+        () -> {
+          c().newChat();
+          c().setDraft("");
+          c().attachments = new JSONArray();
+          c().save();
+        });
+    String[] alpha = {""}, beta = {""};
+    try {
+      ui(
+          () ->
+              c().submit(
+                      "Use the terminal to run sleep 15, then reply exactly SIDEBAR_ALPHA_OK. Do"
+                          + " not do anything else."));
+      until(() -> c().running && !c().submissionPending && !c().storedId.isEmpty(), 35);
+      alpha[0] = c().storedId;
+      ui(
+          () -> {
+            c().setDraft("next for alpha");
+            c().addAttachment(
+                    obj(
+                        "id",
+                        "alpha-file",
+                        "name",
+                        "alpha.txt",
+                        "mime",
+                        "text/plain",
+                        "path",
+                        "alpha.txt"));
+          });
+      device.findObject(By.desc("new chat")).click();
+      until(() -> c().storedId.isEmpty(), 5);
+      assertEquals("", c().draft);
+      assertEquals(0, c().attachments.length());
+      assertEquals("next for alpha", ChatDrafts.read(c().profile(), alpha[0]).optString("text"));
+      assertTrue("leaving the chat keeps its task alive", c().anyRunning());
+      ui(() -> c().submit("Reply exactly SIDEBAR_BETA_OK. Do not use any tools."));
+      until(() -> !c().storedId.isEmpty() && !c().submissionPending, 30);
+      beta[0] = c().storedId;
+      assertNotEquals(alpha[0], beta[0]);
+      ui(
+          () -> {
+            c().setDraft("next for beta");
+            c().gateway.close();
+            c().connectSaved();
+          });
+      until(() -> c().gateway.online() && !c().status.equals("loading chat"), 25);
+      device.findObject(By.desc("server and connection")).click();
+      device.findObject(By.desc("about lcb-hermes")).click();
+      backGesture();
+      backGesture();
+      assertTrue(device.wait(Until.hasObject(By.desc("message Hermes")), 5000));
+      assertEquals(beta[0], c().storedId);
+      assertEquals("next for beta", c().draft);
+      until(() -> !c().anyRunning(), 120);
+      assertEquals("reply", c().chatBadge(alpha[0]));
+      assertEquals(beta[0], c().storedId);
+      assertFalse(
+          "the other reply cannot enter this transcript",
+          c().export().contains("SIDEBAR_ALPHA_OK"));
+      StatusBarNotification reply = null;
+      for (StatusBarNotification n : manager.getActiveNotifications())
+        if (n.getId() == 2 && n.getTag().endsWith(":" + alpha[0])) reply = n;
+      assertNotNull("a reply notification belongs to alpha", reply);
+      reply.getNotification().contentIntent.send();
+      until(() -> c().storedId.equals(alpha[0]) && !c().status.equals("loading chat"), 20);
+      assertEquals("next for alpha", c().draft);
+      assertEquals(1, c().attachments.length());
+      assertTrue(c().export().contains("SIDEBAR_ALPHA_OK"));
+      assertEquals("", c().chatBadge(alpha[0]));
+      ui(() -> c().resume(beta[0]));
+      until(() -> c().storedId.equals(beta[0]) && !c().status.equals("loading chat"), 20);
+      assertEquals("next for beta", c().draft);
+      assertEquals(0, c().attachments.length());
+      ui(() -> activity.getActivity().recreate());
+      assertTrue(device.wait(Until.hasObject(By.desc("message Hermes")), 5000));
+      assertEquals(beta[0], c().storedId);
+      assertEquals("next for beta", c().draft);
+      capture("sidebar-live-separate-chats");
+    } finally {
+      ui(
+          () -> {
+            if (!alpha[0].isEmpty()) c().stop(alpha[0]);
+            if (!beta[0].isEmpty()) c().stop(beta[0]);
+          });
+    }
+  }
+
+  @Test
   public void serverBackKeepsWorkingChat() throws Exception {
     Assume.assumeTrue("emulator only", Build.MODEL.contains("sdk"));
     until(() -> c().loaded, 15);
@@ -151,9 +409,9 @@ public class ClientTest {
       assertTrue(c().requests.isEmpty());
       device.findObject(By.desc("server and connection")).click();
       device.findObject(By.desc("about lcb-hermes")).click();
-      assertTrue(device.wait(Until.hasObject(By.text("lcb-hermes 0.2.1")), 3000));
+      assertTrue(device.wait(Until.hasObject(By.text("lcb-hermes 0.3.0")), 3000));
       backGesture();
-      assertTrue(device.wait(Until.gone(By.text("lcb-hermes 0.2.1")), 3000));
+      assertTrue(device.wait(Until.gone(By.text("lcb-hermes 0.3.0")), 3000));
       assertNotNull(device.findObject(By.desc("about lcb-hermes")));
       backGesture();
       assertTrue(

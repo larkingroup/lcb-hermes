@@ -25,14 +25,19 @@ import org.json.*;
 
 public final class MainActivity extends Activity implements Controller.Observer {
   Controller c;
-  private LinearLayout root, content, transcript, toolsPanel, sessionPane, attachmentTray;
+  private LinearLayout root, content, transcript, toolsPanel, sidebar, sideList, attachmentTray;
+  private FrameLayout workspace;
+  private View drawerScrim;
+  private EditText sideSearch;
+  private String chatQuery = "", sidebarState = "";
+  private String notificationSession = "", notificationProfile = "";
+  private TextView chatTitle;
   private TextView connection, modelLabel, notice, serverStatus;
   private EditText composer;
   private Button send, approval;
   private ScrollView chatScroll;
   private final Map<JSONObject, TextView> messageViews = new IdentityHashMap<>();
   private boolean sessionsExpanded;
-  private Button sessionPicker;
   private Markwon markdown;
   private int face, paper, shadow, ink, muted, blue, blueInk, accent, accentInk;
   private String page = "chat", theme = "";
@@ -66,6 +71,9 @@ public final class MainActivity extends Activity implements Controller.Observer 
     if (saved != null) {
       page = saved.getString("page", "chat");
       sessionsExpanded = saved.getBoolean("sessions", false);
+      chatQuery = saved.getString("chatQuery", "");
+      notificationSession = saved.getString("notificationSession", "");
+      notificationProfile = saved.getString("notificationProfile", "");
     }
     markdown =
         Markwon.builder(this)
@@ -79,6 +87,8 @@ public final class MainActivity extends Activity implements Controller.Observer 
                 })
             .build();
     build();
+    if (saved == null) notificationIntent(getIntent());
+    else routeNotification();
   }
 
   @Override
@@ -99,14 +109,15 @@ public final class MainActivity extends Activity implements Controller.Observer 
   }
 
   private boolean navigateBack() {
-    if (!page.equals("chat")) {
-      show("chat");
+    if (sessionsExpanded) {
+      hideKeyboard();
+      sessionsExpanded = false;
+      setSidebarVisible();
+      updateBackHandler();
       return true;
     }
-    if (sessionsExpanded) {
-      sessionsExpanded = false;
-      if (sessionPane != null) sessionPane.removeAllViews();
-      updateBackHandler();
+    if (!page.equals("chat")) {
+      show("chat");
       return true;
     }
     return false;
@@ -139,6 +150,9 @@ public final class MainActivity extends Activity implements Controller.Observer 
     super.onSaveInstanceState(b);
     b.putString("page", page);
     b.putBoolean("sessions", sessionsExpanded);
+    b.putString("chatQuery", chatQuery);
+    b.putString("notificationSession", notificationSession);
+    b.putString("notificationProfile", notificationProfile);
   }
 
   @Override
@@ -155,8 +169,39 @@ public final class MainActivity extends Activity implements Controller.Observer 
   protected void onNewIntent(Intent intent) {
     super.onNewIntent(intent);
     setIntent(intent);
-    if (intent.getBooleanExtra("reply", false) || intent.getBooleanExtra("task", false))
-      show("chat");
+    notificationIntent(intent);
+  }
+
+  private void notificationIntent(Intent intent) {
+    if (intent == null
+        || (!intent.getBooleanExtra("reply", false) && !intent.getBooleanExtra("task", false)))
+      return;
+    notificationSession =
+        intent.getStringExtra("session") == null ? "" : intent.getStringExtra("session");
+    notificationProfile =
+        intent.getStringExtra("profile") == null ? "" : intent.getStringExtra("profile");
+    intent.removeExtra("reply");
+    intent.removeExtra("task");
+    intent.removeExtra("session");
+    intent.removeExtra("profile");
+    sessionsExpanded = false;
+    show("chat");
+    routeNotification();
+  }
+
+  private void routeNotification() {
+    if (!c.loaded || notificationSession.isEmpty()) return;
+    if (!notificationProfile.isEmpty() && !notificationProfile.equals(c.profileId)) {
+      notificationSession = "";
+      c.notice = "This reply belongs to another saved server.";
+      show("server");
+      return;
+    }
+    if (c.submissionPending || c.uploadsPending > 0 || c.status.equals("loading chat")) return;
+    if (c.gateway == null || !c.gateway.online()) return;
+    String id = notificationSession;
+    notificationSession = "";
+    if (!id.equals(c.storedId)) c.resume(id);
   }
 
   @Override
@@ -183,7 +228,12 @@ public final class MainActivity extends Activity implements Controller.Observer 
     return getResources().getConfiguration().screenHeightDp < 500;
   }
 
+  private boolean wide() {
+    return getResources().getConfiguration().screenWidthDp >= 600;
+  }
+
   private int gutter() {
+    if (wide()) return dp(12);
     return dp(12 + Math.max(0, (getResources().getConfiguration().screenWidthDp - 820) / 2f));
   }
 
@@ -273,6 +323,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
     colors();
     root = column();
     root.setBackgroundColor(face);
+    root.setFocusableInTouchMode(true);
     root.setPadding(gutter(), 0, gutter(), 0);
     setContentView(root);
     if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
@@ -303,6 +354,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
                   | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
     LinearLayout bar = row();
     bar.setPadding(0, dp(8), 0, dp(8));
+    if (!wide()) bar.addView(iconButton("sidebar", "choose chat", this::toggleSessions));
     ImageView logo = new ImageView(this);
     logo.setImageResource(R.drawable.lcb_logo);
     logo.setContentDescription("LCB");
@@ -323,9 +375,42 @@ public final class MainActivity extends Activity implements Controller.Observer 
             "server and connection",
             () -> show(page.equals("server") ? "chat" : "server")));
     add(root, bar);
+    workspace = new FrameLayout(this);
+    root.addView(workspace, new LinearLayout.LayoutParams(-1, 0, 1));
+    LinearLayout panes = row();
+    panes.setGravity(Gravity.TOP);
+    workspace.addView(panes, new FrameLayout.LayoutParams(-1, -1));
+    sidebar = column();
+    if (wide()) {
+      sessionsExpanded = false;
+      panes.addView(sidebar, new LinearLayout.LayoutParams(dp(224), -1));
+      View line = new View(this);
+      line.setBackgroundColor(shadow);
+      LinearLayout.LayoutParams edge = new LinearLayout.LayoutParams(dp(1), -1);
+      edge.setMargins(dp(8), 0, dp(12), dp(8));
+      panes.addView(line, edge);
+    }
     content = column();
-    root.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
+    panes.addView(content, new LinearLayout.LayoutParams(0, -1, 1));
+    if (!wide()) {
+      drawerScrim = new View(this);
+      drawerScrim.setBackgroundColor(0x70000000);
+      drawerScrim.setContentDescription("close chats");
+      drawerScrim.setOnClickListener(v -> toggleSessions());
+      workspace.addView(drawerScrim, new FrameLayout.LayoutParams(-1, -1));
+      FrameLayout.LayoutParams drawer =
+          new FrameLayout.LayoutParams(
+              dp(Math.min(288, getResources().getConfiguration().screenWidthDp - 56)),
+              -1,
+              Gravity.START);
+      drawer.setMargins(0, 0, 0, dp(8));
+      sidebar.setElevation(dp(8));
+      workspace.addView(sidebar, drawer);
+    }
+    buildSidebar();
+    setSidebarVisible();
     show(page);
+    root.requestFocus();
   }
 
   private Drawable surface(int fill, int radius, boolean border) {
@@ -354,7 +439,8 @@ public final class MainActivity extends Activity implements Controller.Observer 
   private void show(String name) {
     stopServerStats();
     if (name.equals("sessions")) {
-      sessionsExpanded = true;
+      sessionsExpanded = !wide();
+      refreshSessions();
       name = "chat";
     }
     page = name.equals("server") ? "server" : "chat";
@@ -362,50 +448,30 @@ public final class MainActivity extends Activity implements Controller.Observer 
     composer = null;
     messageViews.clear();
     notice = null;
-    sessionPane = null;
     attachmentTray = null;
     serverStatus = null;
     statsRows = null;
     statsNotice = null;
-    if (page.equals("server")) server();
-    else chat();
+    setSidebarVisible();
+    if (page.equals("server")) {
+      sessionsExpanded = false;
+      setSidebarVisible();
+      server();
+    } else chat();
     update(false);
     updateBackHandler();
   }
 
   private void chat() {
     LinearLayout top = row();
-    sessionPicker = button(c.title + "  ⌄", this::toggleSessions);
-    sessionPicker.setTextSize(16);
-    sessionPicker.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-    sessionPicker.setSingleLine(true);
-    sessionPicker.setEllipsize(TextUtils.TruncateAt.END);
-    sessionPicker.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-    sessionPicker.setPadding(dp(4), 0, dp(8), 0);
-    sessionPicker.setBackground(
-        new RippleDrawable(
-            android.content.res.ColorStateList.valueOf(blue),
-            surface(Color.TRANSPARENT, 6, false),
-            null));
-    sessionPicker.setContentDescription("choose chat");
-    weighted(top, sessionPicker);
-    Button fresh =
-        button(
-            "new chat",
-            () -> {
-              c.newChat();
-              needsScroll = true;
-              sessionsExpanded = false;
-              show("chat");
-            });
-    fresh.setContentDescription("new chat");
-    fresh.setTextColor(theme.equals("dark") ? blueInk : accent);
-    fresh.setBackground(surface(paper, 8, true));
-    top.addView(fresh);
+    chatTitle = text(c.title, 17, ink);
+    chatTitle.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+    chatTitle.setSingleLine(true);
+    chatTitle.setEllipsize(TextUtils.TruncateAt.END);
+    chatTitle.setPadding(dp(4), dp(6), dp(8), dp(6));
+    weighted(top, chatTitle);
+    if (!wide()) top.addView(iconButton("new", "new chat", this::freshChat));
     add(content, top);
-    sessionPane = column();
-    add(content, sessionPane);
-    if (sessionsExpanded) renderSessionPicker();
     modelLabel = label((c.model.isEmpty() ? "server default" : c.model) + "  ⌄");
     modelLabel.setOnClickListener(v -> models());
     modelLabel.setContentDescription("choose model");
@@ -485,102 +551,198 @@ public final class MainActivity extends Activity implements Controller.Observer 
     renderTranscript();
   }
 
+  private void freshChat() {
+    c.newChat();
+    needsScroll = true;
+    sessionsExpanded = false;
+    hideKeyboard();
+    show("chat");
+    setSidebarVisible();
+    refreshSessions();
+  }
+
+  private void hideKeyboard() {
+    android.view.inputmethod.InputMethodManager input =
+        getSystemService(android.view.inputmethod.InputMethodManager.class);
+    input.hideSoftInputFromWindow(root.getWindowToken(), 0);
+    root.requestFocus();
+  }
+
   private void toggleSessions() {
+    if (wide()) return;
     sessionsExpanded = !sessionsExpanded;
-    if (sessionsExpanded) renderSessionPicker();
-    else if (sessionPane != null) sessionPane.removeAllViews();
+    hideKeyboard();
+    setSidebarVisible();
+    if (sessionsExpanded) refreshSessions();
     updateBackHandler();
   }
 
-  private void renderSessionPicker() {
-    if (sessionPane == null) return;
-    sessionPane.removeAllViews();
-    LinearLayout pane = column();
-    pane.setPadding(dp(10), dp(8), dp(10), dp(8));
-    pane.setBackground(surface(paper, 10, true));
-    add(sessionPane, pane);
-    EditText search = new EditText(this);
-    search.setTextSize(14);
-    search.setTextColor(ink);
-    search.setHintTextColor(muted);
-    search.setHint("find a chat");
-    search.setSingleLine();
-    search.setBackgroundColor(Color.TRANSPARENT);
-    search.setPadding(dp(4), dp(4), dp(4), dp(8));
-    add(pane, search);
+  private void setSidebarVisible() {
+    if (sidebar == null) return;
+    sidebar.setVisibility(wide() || sessionsExpanded ? View.VISIBLE : View.GONE);
+    if (drawerScrim != null) drawerScrim.setVisibility(sessionsExpanded ? View.VISIBLE : View.GONE);
+    if (!wide() && content != null)
+      content.setImportantForAccessibility(
+          sessionsExpanded
+              ? View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+              : View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
+  }
+
+  private void buildSidebar() {
+    sidebar.setPadding(dp(8), dp(4), dp(8), dp(8));
+    sidebar.setBackground(surface(color(theme.equals("dark") ? "#233039" : "#e6ebe8"), 4, true));
+    sidebar.setFocusableInTouchMode(true);
+    LinearLayout heading = row();
+    TextView name = text("chats", 14, muted);
+    name.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+    weighted(heading, name);
+    heading.addView(iconButton("new", "create chat", this::freshChat));
+    if (!wide()) heading.addView(iconButton("close", "hide chats", this::toggleSessions));
+    add(sidebar, heading);
+    sideSearch = new EditText(this);
+    sideSearch.setContentDescription("find a chat");
+    sideSearch.setTextSize(13);
+    sideSearch.setTextColor(ink);
+    sideSearch.setHintTextColor(muted);
+    sideSearch.setHint("find a chat");
+    sideSearch.setSingleLine();
+    sideSearch.setPadding(dp(12), dp(10), dp(12), dp(10));
+    sideSearch.setBackground(surface(paper, 4, true));
+    sideSearch.setText(chatQuery);
+    add(sidebar, sideSearch);
+    gap(sidebar, 8);
     ScrollView scroll = new ScrollView(this);
-    LinearLayout list = column();
-    scroll.addView(list);
-    pane.addView(scroll, new LinearLayout.LayoutParams(-1, dp(compact() ? 130 : 230)));
-    Runnable render =
-        () -> {
-          list.removeAllViews();
-          JSONArray all = c.sessions;
-          int count = 0;
-          String query = search.getText().toString().toLowerCase(Locale.ROOT);
-          if (all != null)
-            for (int i = 0; i < all.length(); i++) {
-              JSONObject session = all.optJSONObject(i);
-              if (session == null) continue;
-              String title = session.optString("title", "untitled"),
-                  preview = session.optString("preview");
-              if (!(title + preview).toLowerCase(Locale.ROOT).contains(query)) continue;
-              LinearLayout item = column();
-              item.setPadding(dp(6), dp(7), dp(6), dp(7));
-              String id = session.optString("id");
-              item.setBackground(surface(id.equals(c.storedId) ? blue : paper, 6, false));
-              TextView name = text(title, 15, ink);
-              name.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-              name.setSingleLine();
-              name.setEllipsize(TextUtils.TruncateAt.END);
-              add(item, name);
-              if (!preview.isEmpty()) {
-                TextView detail = text(preview, 12, muted);
-                detail.setSingleLine();
-                detail.setEllipsize(TextUtils.TruncateAt.END);
-                add(item, detail);
-              }
-              item.setContentDescription(title + ", open chat");
-              item.setOnClickListener(
-                  v -> {
-                    if (c.running || c.submissionPending) {
-                      toast("Finish this task first.");
-                      return;
-                    }
-                    c.save();
-                    c.resume(id);
-                    sessionsExpanded = false;
-                    needsScroll = true;
-                    show("chat");
-                  });
-              item.setOnLongClickListener(
-                  v -> {
-                    sessionMenu(session);
-                    return true;
-                  });
-              add(list, item);
-              count++;
-            }
-          if (count == 0) add(list, label(query.isEmpty() ? "no chats yet" : "no matching chats"));
-        };
-    search.addTextChangedListener(
+    scroll.setFillViewport(true);
+    sideList = column();
+    scroll.addView(sideList);
+    sidebar.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+    TextView footer = label("Hermes · your server");
+    footer.setTypeface(Typeface.MONOSPACE);
+    add(sidebar, footer);
+    sideSearch.addTextChangedListener(
         new TextWatcher() {
           public void beforeTextChanged(CharSequence s, int st, int co, int a) {}
 
           public void onTextChanged(CharSequence s, int st, int b, int co) {
-            render.run();
+            chatQuery = s.toString();
+            renderSidebar();
           }
 
           public void afterTextChanged(Editable e) {}
         });
-    render.run();
-    if (c.gateway != null && c.gateway.online())
-      c.list(
-          (v, e) -> {
-            if (!sessionsExpanded || sessionPane == null || isDestroyed()) return;
-            if (e == null) render.run();
-            else toast(e);
+    sidebarState = "";
+    renderSidebar();
+    refreshSessions();
+  }
+
+  private void refreshSessions() {
+    Gateway source = c.gateway;
+    String profile = c.profileId;
+    if (source == null || !source.online()) return;
+    c.list(
+        (v, e) -> {
+          if (source != c.gateway || !profile.equals(c.profileId) || isDestroyed()) return;
+          if (e == null) renderSidebar();
+          else if (sessionsExpanded) toast(e);
+        });
+  }
+
+  private void renderSidebar() {
+    if (sideList == null) return;
+    JSONArray catalog = c.sidebarSessions();
+    String state =
+        catalog + "|" + c.storedId + "|" + c.title + "|" + chatQuery + "|" + c.sidebarBadges();
+    if (state.equals(sidebarState)) return;
+    sidebarState = state;
+    sideList.removeAllViews();
+    String query = chatQuery.toLowerCase(Locale.ROOT).trim();
+    int count = 0;
+    if ("new chat".contains(query)) {
+      addChatEntry(obj("id", "", "title", "new chat"));
+      count++;
+    }
+    Set<String> seen = new HashSet<>();
+    boolean listed = false;
+    for (int i = 0; i < catalog.length(); i++)
+      if (catalog.optJSONObject(i) != null
+          && c.storedId.equals(catalog.optJSONObject(i).optString("id"))) listed = true;
+    if (!c.storedId.isEmpty() && !listed) {
+      JSONObject active = obj("id", c.storedId, "title", c.title);
+      if (c.title.toLowerCase(Locale.ROOT).contains(query)) {
+        addChatEntry(active);
+        count++;
+      }
+      seen.add(c.storedId);
+    }
+    JSONArray all = catalog;
+    if (all != null)
+      for (int i = 0; i < all.length(); i++) {
+        JSONObject session = all.optJSONObject(i);
+        if (session == null || !seen.add(session.optString("id"))) continue;
+        if (session.optString("id").equals(c.storedId))
+          session =
+              obj("id", c.storedId, "title", c.title, "preview", session.optString("preview"));
+        String title = session.optString("title", ""), preview = session.optString("preview");
+        if (!(title + " " + preview).toLowerCase(Locale.ROOT).contains(query)) continue;
+        addChatEntry(session);
+        count++;
+      }
+    if (count == 0) add(sideList, label("no matching chats"));
+  }
+
+  private void addChatEntry(JSONObject session) {
+    String id = session.optString("id");
+    boolean selected = id.equals(c.storedId);
+    String title = session.optString("title");
+    if (title.isBlank()) title = session.optString("preview", "untitled");
+    if (title.isBlank()) title = "untitled";
+    String badge = c.chatBadge(id);
+    LinearLayout item = row();
+    item.setPadding(dp(4), dp(4), dp(4), dp(4));
+    item.setMinimumHeight(dp(48));
+    item.setBackground(
+        new RippleDrawable(
+            android.content.res.ColorStateList.valueOf(blue),
+            surface(selected ? blue : Color.TRANSPARENT, 4, selected),
+            null));
+    View marker = new View(this);
+    marker.setBackgroundColor(selected ? accent : Color.TRANSPARENT);
+    item.addView(marker, new LinearLayout.LayoutParams(dp(3), dp(24)));
+    TextView name = text(title, 14, selected ? blueInk : ink);
+    name.setMaxLines(2);
+    name.setEllipsize(TextUtils.TruncateAt.END);
+    name.setTypeface(Typeface.DEFAULT, selected ? Typeface.BOLD : Typeface.NORMAL);
+    weighted(item, name);
+    if (!badge.isEmpty()) {
+      TextView status =
+          text(badge.equals("reply") ? "●" : badge.equals("working") ? "◌" : "!", 14, accent);
+      status.setContentDescription(badge);
+      item.addView(status);
+    }
+    item.setContentDescription(title + ", open chat" + (badge.isEmpty() ? "" : ", " + badge));
+    item.setSelected(selected);
+    item.setOnClickListener(
+        v -> {
+          if (c.submissionPending || c.uploadsPending > 0 || c.status.equals("loading chat")) {
+            toast("One moment. Your message is still being sent or loaded.");
+            return;
+          }
+          if (id.isEmpty()) c.newChat();
+          else if (!id.equals(c.storedId)) c.resume(id);
+          sessionsExpanded = false;
+          hideKeyboard();
+          needsScroll = true;
+          show("chat");
+          setSidebarVisible();
+        });
+    if (!id.isEmpty())
+      item.setOnLongClickListener(
+          v -> {
+            sessionMenu(session);
+            return true;
           });
+    add(sideList, item);
+    gap(sideList, 3);
   }
 
   private void renderTranscript() {
@@ -643,6 +805,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
       renderImages(block, Attachments.forRow(item), false);
       TextView bodyView = text(body, 16, ink);
       bodyView.setTextIsSelectable(true);
+      bodyView.setBackgroundColor(Color.TRANSPARENT);
       bodyView.setLineSpacing(dp(1), 1);
       markdown.setMarkdown(bodyView, body);
       add(block, bodyView);
@@ -693,16 +856,19 @@ public final class MainActivity extends Activity implements Controller.Observer 
   }
 
   private void update(boolean structure) {
+    routeNotification();
     JSONObject p = c.profile();
     connection.setText(
         (p == null ? "no server" : p.optString("name"))
             + "  ·  "
             + (c.running ? "working" : c.status));
+    renderSidebar();
     if (!page.equals("chat")) {
       if (serverStatus != null) serverStatus.setText(c.status);
       return;
     }
-    sessionPicker.setText(c.title + "  ⌄");
+    setSidebarVisible();
+    chatTitle.setText(c.title);
     modelLabel.setText((c.model.isEmpty() ? "server default" : c.model) + "  ⌄");
     if (notice != null) {
       String n = c.notice;
@@ -740,7 +906,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
 
   private void about() {
     new Sheet.Builder(this)
-        .setTitle("lcb-hermes 0.2.1")
+        .setTitle("lcb-hermes 0.3.0")
         .setMessage(
             "A small client for Hermes.\n\n"
                 + "No ads. No purchases. No analytics.\n\n"
@@ -760,8 +926,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
                 case 0:
                   if (c.profile() == null) loginDialog();
                   else {
-                    c.close();
-                    c.connectSaved();
+                    c.reconnect();
                   }
                   break;
                 case 1:
@@ -926,6 +1091,12 @@ public final class MainActivity extends Activity implements Controller.Observer 
         .setItems(
             new String[] {"rename", "delete"},
             (d, n) -> {
+              if (n == 1
+                  && (c.chatBadge(id).equals("working")
+                      || c.chatBadge(id).equals("answer needed"))) {
+                toast("Stop this task before deleting its chat.");
+                return;
+              }
               if (n == 0) {
                 LinearLayout box = column();
                 box.setPadding(dp(16), 0, dp(16), 0);
@@ -959,7 +1130,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
                                 (v, e) -> {
                                   if (e != null) toast(e);
                                   else {
-                                    if (id.equals(c.storedId)) c.newChat();
+                                    c.removedChat(id);
                                     show("sessions");
                                   }
                                 }))
