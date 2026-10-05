@@ -569,7 +569,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
                   break;
                 case 6:
                   new AlertDialog.Builder(this)
-                      .setTitle("lcb-hermes 0.1.0")
+                      .setTitle("lcb-hermes 0.1.1")
                       .setMessage(
                           "A small client for Hermes.\n\n"
                               + "No ads. No purchases. No analytics.\n\n"
@@ -633,13 +633,13 @@ public final class MainActivity extends Activity implements Controller.Observer 
     LinearLayout box = column();
     box.setBackgroundColor(face);
     box.setPadding(dp(16), dp(8), dp(16), dp(8));
-    EditText name = field(box, "server name", "Hermes", false);
+    EditText name = field(box, "server name", "", false);
     JSONObject current = c.profile();
     EditText url =
         field(
             box,
             "dashboard URL",
-            current == null ? "http://192.168.0.50:9119" : current.optString("url"),
+            current == null ? "" : current.optString("url"),
             false);
     url.setInputType(
         android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
@@ -652,7 +652,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
     http.setChecked(current != null && current.optBoolean("http"));
     add(box, http);
     TextView explanation =
-        text("Use your dashboard login. OpenAI is already signed in on your server.", 13, muted);
+        text("Use your dashboard login. Model providers are configured on your server.", 13, muted);
     add(box, explanation);
     TextView error = text("", 13, color("#ba4b35"));
     add(box, error);

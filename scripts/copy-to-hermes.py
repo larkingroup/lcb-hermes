@@ -1,7 +1,9 @@
-import hashlib,http.cookiejar,json,secrets,urllib.request,urllib.parse
+import hashlib,http.cookiejar,json,secrets,urllib.request,urllib.parse,re
 from pathlib import Path
 root=Path(__file__).resolve().parents[1]
 base='http://192.168.0.50:9119'
+version=re.search(r"versionName '([^']+)'",(root/'app/build.gradle').read_text()).group(1)
+dist=root/'dist'/version
 access=root.parent/'hermes-truenas/dashboard-access.txt'
 password=next(s[10:] for s in access.read_text().splitlines() if s.startswith('Password: '))
 jar=http.cookiejar.CookieJar()
@@ -11,10 +13,10 @@ def request(path,data=None):
     return json.load(opener.open(req,timeout=60))
 request('/auth/password-login',{'provider':'basic','username':'vince','password':password})
 files=request('/api/files')
-folder=files['path'].rstrip('/')+'/lcb-hermes/releases/0.1.0'
+folder=files['path'].rstrip('/')+'/lcb-hermes/releases/'+version
 download={}
-for name in ['lcb-hermes-0.1.0.apk','lcb-hermes-0.1.0.aab','SHA256SUMS.txt']:
-    content=(root/'dist'/name).read_bytes()
+for name in [f'lcb-hermes-{version}.apk',f'lcb-hermes-{version}.aab','SHA256SUMS.txt']:
+    content=(dist/name).read_bytes()
     path=folder+'/'+name
     boundary='LCB'+secrets.token_hex(20)
     payload=(f'--{boundary}\r\nContent-Disposition: form-data; name="path"\r\n\r\n{path}\r\n--{boundary}\r\nContent-Disposition: form-data; name="overwrite"\r\n\r\nfalse\r\n--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{name}"\r\nContent-Type: application/octet-stream\r\n\r\n').encode()+content+f'\r\n--{boundary}--\r\n'.encode()
@@ -27,6 +29,6 @@ for name in ['lcb-hermes-0.1.0.apk','lcb-hermes-0.1.0.aab','SHA256SUMS.txt']:
     with opener.open(url,timeout=90) as response:
         assert hashlib.sha256(response.read()).digest()==hashlib.sha256(content).digest(),'NAS copy mismatch'
     download[name]=url
-(root/'dist/nas-downloads.json').write_text(json.dumps(download,indent=2)+'\n')
+(dist/'nas-downloads.json').write_text(json.dumps(download,indent=2)+'\n')
 print('Copied and verified through the authenticated Hermes dashboard. No new ports.')
-print('APK:',download['lcb-hermes-0.1.0.apk'])
+print('APK:',download[f'lcb-hermes-{version}.apk'])
