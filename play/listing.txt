@@ -1,0 +1,10 @@
+lcb-hermes
+
+A small native client for your Hermes server.
+
+Chat from your phone. Watch tools work. Keep your sessions.
+Files, model selection, approvals, voice input, and Markdown export.
+Light and dark, with a compact classic interface.
+
+Bring your own Hermes server. OpenAI sign-in stays on the server.
+No ads. No in-app purchases. No analytics.
