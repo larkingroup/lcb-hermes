@@ -2,8 +2,10 @@
 
 A small native Android client for Hermes. No ads. No purchases.
 
-Connect with the Hermes dashboard URL and dashboard login. OpenAI stays on the server.
-Private HTTP needs the checkbox; public servers need HTTPS. No ports to add.
+<img src="branding/phone.png" width="280" alt="lcb-hermes">
+
+Connect with the Hermes dashboard URL and dashboard login. Models stay on the server.
+Private HTTP needs the checkbox; the client can find the right protocol. No ports to add.
 
 Chat, sessions, files, tools, approvals, voice input, export. Light or dark.
 

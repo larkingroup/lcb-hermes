@@ -7,12 +7,14 @@ final class Bevel extends Drawable {
   private final Paint p = new Paint();
   private final int face, light, shadow;
   private final boolean inset;
+  private final int edge;
 
-  Bevel(int face, int light, int shadow, boolean inset) {
+  Bevel(int face, int light, int shadow, boolean inset, int edge) {
     this.face = face;
     this.light = light;
     this.shadow = shadow;
     this.inset = inset;
+    this.edge = edge;
   }
 
   @Override
@@ -20,7 +22,7 @@ final class Bevel extends Drawable {
     Rect b = getBounds();
     p.setColor(face);
     c.drawRect(b, p);
-    p.setStrokeWidth(2);
+    p.setStrokeWidth(edge);
     p.setColor(inset ? shadow : light);
     c.drawLine(b.left, b.bottom - 1, b.left, b.top, p);
     c.drawLine(b.left, b.top, b.right - 1, b.top, p);

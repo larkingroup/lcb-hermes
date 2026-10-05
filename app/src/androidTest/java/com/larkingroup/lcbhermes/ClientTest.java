@@ -3,8 +3,16 @@ package com.larkingroup.lcbhermes;
 import static com.larkingroup.lcbhermes.Protocol.obj;
 import static org.junit.Assert.*;
 
+import android.app.NotificationManager;
 import android.content.*;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Color;
 import android.os.*;
+import android.service.notification.StatusBarNotification;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Button;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.rule.ActivityTestRule;
@@ -44,10 +52,120 @@ public class ClientTest {
   }
 
   private void capture(String name) throws Exception {
+    InstrumentationRegistry.getInstrumentation().waitForIdleSync();
     device.waitForIdle();
+    Thread.sleep(300);
     File dir = new File(activity.getActivity().getFilesDir(), "captures");
     dir.mkdirs();
     assertTrue(device.takeScreenshot(new File(dir, name + ".png")));
+  }
+
+  private Button button(View view, String name) {
+    if (view instanceof Button && ((Button) view).getText().toString().equals(name))
+      return (Button) view;
+    if (view instanceof ViewGroup)
+      for (int i = 0; i < ((ViewGroup) view).getChildCount(); i++) {
+        Button found = button(((ViewGroup) view).getChildAt(i), name);
+        if (found != null) return found;
+      }
+    return null;
+  }
+
+  @Test
+  public void phoneFixes() throws Exception {
+    Assume.assumeTrue("emulator only", Build.MODEL.contains("sdk"));
+    File fixture = new File(activity.getActivity().getFilesDir(), "fixture.json");
+    Assume.assumeTrue("private test access required", fixture.exists());
+    JSONObject access =
+        new JSONObject(
+            new String(java.nio.file.Files.readAllBytes(fixture.toPath()), StandardCharsets.UTF_8));
+    assertTrue(fixture.delete());
+    until(() -> c().loaded, 15);
+    ui(() -> c().forget());
+    device.findObject(By.text("connect a server")).click();
+    assertTrue(device.wait(Until.hasObject(By.text("connect a server")), 5000));
+    capture("phone-connect-screenshot");
+    Bitmap screenshot =
+        BitmapFactory.decodeFile(
+            new File(activity.getActivity().getFilesDir(), "captures/phone-connect-screenshot.png")
+                .toString());
+    assertNotEquals(
+        "login screenshot must not be blocked",
+        Color.BLACK,
+        screenshot.getPixel(screenshot.getWidth() / 2, screenshot.getHeight() / 2));
+    screenshot.recycle();
+    device.findObject(By.text(java.util.regex.Pattern.compile("(?i)cancel"))).click();
+    if (Build.VERSION.SDK_INT >= 33)
+      device.executeShellCommand(
+          "pm grant com.larkingroup.lcbhermes android.permission.POST_NOTIFICATIONS");
+    CountDownLatch login = new CountDownLatch(1);
+    String[] failure = {null};
+    ui(
+        () ->
+            c().login(
+                    "Test server",
+                    access.optString("url").replaceFirst("^http:", "https:"),
+                    access.optString("username"),
+                    access.optString("password"),
+                    true,
+                    (v, e) -> {
+                      failure[0] = e;
+                      login.countDown();
+                    }));
+    assertTrue("protocol recovery login timeout", login.await(45, TimeUnit.SECONDS));
+    assertNull(failure[0]);
+    assertTrue(c().profile().optString("url").startsWith("http:"));
+    until(() -> c().gateway != null && c().gateway.online(), 15);
+    ui(
+        () -> {
+          Button model = button(activity.getActivity().getWindow().getDecorView(), "model");
+          assertNotNull(model);
+          for (int i = 0; i < 3; i++) model.performClick();
+        });
+    assertTrue(device.wait(Until.hasObject(By.text("model for a new chat")), 10000));
+    device.pressBack();
+    assertTrue(
+        "one back press must close the only picker",
+        device.wait(Until.gone(By.text("model for a new chat")), 3000));
+    NotificationManager manager =
+        activity.getActivity().getSystemService(NotificationManager.class);
+    manager.cancel(2);
+    ui(
+        () -> {
+          c().newChat();
+          c().submit("Reply exactly LCB_PHONE_REPLY_OK. Do not use tools.");
+        });
+    until(() -> c().running, 15);
+    device.pressHome();
+    until(
+        () ->
+            !c().running
+                && c().rows.stream().anyMatch(r -> Protocol.text(r).contains("LCB_PHONE_REPLY_OK")),
+        90);
+    StatusBarNotification[] replies = manager.getActiveNotifications();
+    StatusBarNotification reply =
+        java.util.Arrays.stream(replies)
+            .filter(n -> n.getId() == 2)
+            .findFirst()
+            .orElseThrow(() -> new AssertionError("completion notification missing"));
+    assertEquals("replies", reply.getNotification().getChannelId());
+    assertEquals("Hermes replied", reply.getNotification().extras.getString("android.title"));
+    assertTrue(
+        reply
+            .getNotification()
+            .extras
+            .getCharSequence("android.text")
+            .toString()
+            .contains("LCB_PHONE_REPLY_OK"));
+    assertEquals(
+        NotificationManager.IMPORTANCE_DEFAULT,
+        manager.getNotificationChannel("replies").getImportance());
+    reply.getNotification().contentIntent.send();
+    assertTrue(device.wait(Until.hasObject(By.text("lcb-hermes")), 5000));
+    capture("phone-compact-light");
+    ui(() -> c().theme("dark"));
+    capture("phone-compact-dark");
+    ui(() -> c().theme("light"));
   }
 
   @Test
