@@ -3,9 +3,10 @@
 102 RCDATA "nous-logo.png"
 1 RT_MANIFEST "hermes.manifest"
 1 VERSIONINFO
-FILEVERSION 0,4,0,0
-PRODUCTVERSION 0,4,0,0
+FILEVERSION 0,4,6,0
+PRODUCTVERSION 0,4,6,0
 FILEFLAGSMASK 0x3fL
+FILEFLAGS VS_FF_PRERELEASE
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -15,7 +16,8 @@ BEGIN
   BEGIN
    VALUE "CompanyName", "Larkin Computing Bureau\0"
    VALUE "FileDescription", "lcb-hermes\0"
-   VALUE "FileVersion", "0.4.0\0"
+   VALUE "FileVersion", "0.4.6\0"
+   VALUE "ProductVersion", "0.4.6\0"
    VALUE "ProductName", "lcb-hermes\0"
    VALUE "OriginalFilename", "lcb-hermes.exe\0"
   END

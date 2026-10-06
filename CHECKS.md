@@ -14,7 +14,7 @@ Android 16 emulator. Hermes 0.21.5 on TrueNAS.
 - Reply notifications open their own chat. Back gestures and rotation preserve the selection.
 - Signed APK and AAB verified. Fold installed via USB.
 
-0.4.0 PC / Windows x64, Zig 0.16 C compiler; warnings treated as errors.
+0.4.6 PC prerelease / Windows x64, Zig 0.16 C compiler; warnings treated as errors.
 
 - Seven local C suites: protocol/replay, Markdown, endpoints/DPAPI, native chat/menu
   regressions, resize/streaming, model/server controls, and chat lifecycle/attachments.
