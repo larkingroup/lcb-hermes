@@ -727,7 +727,7 @@ static void draw_about(HDC dc) {
     RECT r={px(14),px(14),px(498),px(82)};
     SetDCBrushColor(dc,app.accent); FillRect(dc,&r,(HBRUSH)GetStockObject(DC_BRUSH)); classic_edge(dc,r,1);
     DrawIconEx(dc,px(28),px(32),LoadIconW(app.instance,MAKEINTRESOURCEW(101)),px(24),px(24),0,NULL,DI_NORMAL);
-    about_text(dc,66,23,290,28,L"lcb-hermes",app.brandfont,app.ink); about_text(dc,436,28,48,20,L"0.4.0",app.normal,app.muted);
+    about_text(dc,66,23,290,28,L"lcb-hermes",app.brandfont,app.ink); about_text(dc,436,28,48,20,L"0.4.6",app.normal,app.muted);
     about_text(dc,66,55,408,20,L"A classic desktop client for Hermes",app.normal,app.ink);
     r=(RECT){px(18),px(104),px(494),px(244)}; FillRect(dc,&r,(HBRUSH)GetStockObject(WHITE_BRUSH)); classic_edge(dc,r,0);
     if(app.nouslogo) { HDC source=CreateCompatibleDC(dc); HGDIOBJ old=SelectObject(source,app.nouslogo); SetStretchBltMode(dc,HALFTONE); SetBrushOrgEx(dc,0,0,NULL); StretchBlt(dc,px(32),px(122),px(104),px(104),source,0,0,app.logo_width,app.logo_height,SRCCOPY); SelectObject(source,old); DeleteDC(source); }
