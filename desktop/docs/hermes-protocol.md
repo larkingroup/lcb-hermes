@@ -50,11 +50,25 @@ and stable row handles survive chat-list refreshes.
 ## Model and monitor
 
 Read-only `config.get` with `key: provider` reports the configured default model.
-No model is hardcoded in the desktop client. A user-selected model/provider is
-the only reason `session.create` includes an override.
+No default model is hardcoded in the desktop client. `model.options` supplies the
+authenticated provider catalog, pricing and reasoning capability flags. Drafts
+save a per-chat model/provider and `reasoning_effort`, passed in `session.create`.
+Existing chats use `config.set`, `key: model`, with `--provider`, `--reasoning`
+and explicit `--session` scope. Hermes defers a busy chat's switch until its next
+turn and handles model-selection confirmation. `config.get`, `key: reasoning`,
+with a session ID reads the chat's effort. OpenAI/Codex levels follow upstream
+`agent/reasoning_effort.py`; model generations differ in their supported levels.
+
+The server default is separate: the dashboard's `POST /api/model/set`, `scope: main`,
+writes its configured model for new sessions. The chat picker does not change it.
+
+Saved servers and cookies share the existing Windows DPAPI store. Names and
+login identity select a server; each server/login retains its own drafts. Removing
+a server hides its entry and clears its saved cookie while preserving local drafts.
+Passwords are never saved.
 
 Authenticated `GET /api/system/stats` supplies the monitor. It is polled every
-five seconds while the monitor or connection window is visible, with one stats
+five seconds while the monitor is visible, with one stats
 request in flight. Readings describe the server host; offline state replaces
 the live figures. Responses are scoped to their originating server URL.
 
@@ -62,6 +76,8 @@ the live figures. Responses are scoped to their originating server URL.
 
 - [Dashboard workspace picker and host statistics](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/web-dashboard.md)
 - [Projects RPC implementation](https://github.com/NousResearch/hermes-agent/blob/main/tui_gateway/methods_projects.py)
+- [Model and reasoning scope](https://github.com/NousResearch/hermes-agent/blob/main/tui_gateway/methods_config_set.py)
+- [Reasoning effort vocabulary](https://github.com/NousResearch/hermes-agent/blob/main/agent/reasoning_effort.py)
 - [Session create and resume](https://github.com/NousResearch/hermes-agent/blob/main/tui_gateway/methods_session.py)
 - [Gateway reasoning callbacks](https://github.com/NousResearch/hermes-agent/blob/main/tui_gateway/agent_callbacks.py)
 - [TUI activity words](https://github.com/NousResearch/hermes-agent/blob/main/ui-tui/src/content/verbs.ts)

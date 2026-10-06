@@ -5,7 +5,7 @@
 
 #define WIRE_LIMIT (8u * 1024u * 1024u)
 typedef struct Chat {
-    char key[65], id[160], stored[160], title[256], model[160];
+    char key[65], id[160], stored[160], title[256], model[160], provider[160], reasoning[32];
     char cwd[1024], project_id[160], project_name[256], activity[512];
     cJSON *activity_log;
     char *draft;
