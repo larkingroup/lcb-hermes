@@ -8,6 +8,28 @@ import android.os.Build;
 import android.os.IBinder;
 
 public final class TurnService extends Service {
+  private static TurnService active;
+  private static boolean requested;
+  private boolean restartAllowed = true;
+
+  static void sync(Context context) {
+    Controller controller = ((HermesApp) context.getApplicationContext()).controller;
+    if (controller.anyRunning()) {
+      if (!requested) {
+        requested = true;
+        try {
+          context.startForegroundService(new Intent(context, TurnService.class));
+        } catch (RuntimeException error) {
+          requested = false;
+        }
+      }
+    } else if (active != null) {
+      active.stopForeground(STOP_FOREGROUND_REMOVE);
+      active.stopSelf();
+    }
+    // A pending start must reach onCreate and post its foreground notification first.
+  }
+
   static void reply(Context context, String text, String error, String profile, String session) {
     NotificationManager manager = context.getSystemService(NotificationManager.class);
     NotificationChannel channel =
@@ -67,6 +89,27 @@ public final class TurnService extends Service {
         new NotificationChannel("tasks", "Hermes tasks", NotificationManager.IMPORTANCE_LOW);
     ch.setLockscreenVisibility(Notification.VISIBILITY_PRIVATE);
     getSystemService(NotificationManager.class).createNotificationChannel(ch);
+    active = this;
+    startForeground(
+        1,
+        new Notification.Builder(this, "tasks")
+            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setContentTitle("Hermes task")
+            .setContentText("Your task runs on your server.")
+            .setOngoing(true)
+            .setVisibility(Notification.VISIBILITY_PRIVATE)
+            .build());
+  }
+
+  @Override
+  public void onDestroy() {
+    if (active == this) {
+      active = null;
+      requested = false;
+    }
+    super.onDestroy();
+    Controller controller = ((HermesApp) getApplication()).controller;
+    if (restartAllowed && controller.anyRunning()) sync(this);
   }
 
   @Override
@@ -113,6 +156,8 @@ public final class TurnService extends Service {
 
   @Override
   public void onTimeout(int startId, int fgsType) {
+    restartAllowed = false;
+    stopForeground(STOP_FOREGROUND_REMOVE);
     stopSelf();
   }
 

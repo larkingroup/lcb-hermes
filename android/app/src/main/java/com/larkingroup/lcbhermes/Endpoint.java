@@ -25,7 +25,7 @@ public final class Endpoint {
         || url.fragment() != null
         || !url.encodedPath().equals("/"))
       throw new IllegalArgumentException(
-          "Use a dashboard URL, such as https://hermes.example.com:9119");
+          "Use a dashboard URL, such as https://server:port");
     if (!url.isHttps() && !privateHttp)
       throw new IllegalArgumentException("Enable private HTTP for a local server, or use HTTPS.");
     return url;

@@ -32,23 +32,18 @@ final class Sheet extends Dialog {
     super(spec.context);
     this.spec = spec;
     requestWindowFeature(Window.FEATURE_NO_TITLE);
-    boolean dark =
-        ((HermesApp) spec.context.getApplicationContext())
-            .controller
-            .data
-            .optString("theme")
-            .equals("dark");
-    int paper = Color.parseColor(dark ? "#1f2930" : "#faf9f4");
-    int ink = Color.parseColor(dark ? "#eef2f1" : "#22323d");
-    int line = Color.parseColor(dark ? "#43515b" : "#d6d9d6");
+    boolean dark = false;
+    int paper = Color.parseColor("#dedac7"),
+        ink = Color.parseColor("#2b302a"),
+        line = Color.parseColor("#8c8b7e");
     LinearLayout body = new LinearLayout(spec.context);
     body.setOrientation(LinearLayout.VERTICAL);
-    body.setPadding(dp(20), dp(12), dp(20), dp(16));
+    LinearLayout header = new LinearLayout(spec.context);
+    header.setOrientation(LinearLayout.VERTICAL);
     GradientDrawable background = new GradientDrawable();
     background.setColor(paper);
     background.setCornerRadius(dp(16));
     background.setStroke(dp(1), line);
-    body.setBackground(background);
     View handle = new View(spec.context);
     GradientDrawable grip = new GradientDrawable();
     grip.setColor(line);
@@ -57,12 +52,12 @@ final class Sheet extends Dialog {
     LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(dp(28), dp(3));
     hp.gravity = Gravity.CENTER;
     hp.bottomMargin = dp(16);
-    body.addView(handle, hp);
+    header.addView(handle, hp);
     if (spec.title != null) {
       TextView title = text(spec.title, 18, ink);
       title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
       title.setPadding(0, 0, 0, dp(14));
-      body.addView(title);
+      header.addView(title);
     }
     if (spec.message != null) {
       TextView message = text(spec.message, 14, ink);
@@ -116,8 +111,8 @@ final class Sheet extends Dialog {
       body.addView(
           list, new LinearLayout.LayoutParams(-1, Math.min(dp(420), dp(49) * spec.items.length)));
     }
+    LinearLayout actions = new LinearLayout(spec.context);
     if (!spec.labels.isEmpty()) {
-      LinearLayout actions = new LinearLayout(spec.context);
       actions.setGravity(Gravity.END);
       actions.setPadding(0, dp(16), 0, 0);
       for (int which : new int[] {-3, -2, -1}) {
@@ -126,16 +121,20 @@ final class Sheet extends Dialog {
         b.setText(spec.labels.get(which));
         b.setAllCaps(false);
         b.setTextSize(14);
-        b.setMinHeight(dp(44));
-        b.setMinimumHeight(dp(44));
+        b.setMinHeight(dp(48));
+        b.setMinimumHeight(dp(48));
         b.setMinWidth(0);
         b.setMinimumWidth(0);
         b.setPadding(dp(16), 0, dp(16), 0);
-        b.setTextColor(which == -1 ? Color.WHITE : ink);
+        b.setTextColor(ink);
         GradientDrawable fill = new GradientDrawable();
         fill.setCornerRadius(dp(9));
         fill.setColor(which == -1 ? Color.parseColor("#315870") : Color.TRANSPARENT);
-        b.setBackground(new RippleDrawable(ColorStateList.valueOf(line), fill, null));
+        b.setBackground(
+            new RippleDrawable(
+                ColorStateList.valueOf(line),
+                new Bevel(paper, Color.parseColor("#fffdee"), line, false, dp(1)),
+                null));
         b.setOnClickListener(
             v -> {
               DialogInterface.OnClickListener cb = spec.clicks.get(which);
@@ -145,12 +144,18 @@ final class Sheet extends Dialog {
         buttons.put(which, b);
         actions.addView(b);
       }
-      body.addView(actions);
     }
     ScrollView outer = new ScrollView(spec.context);
     outer.setFillViewport(false);
     outer.addView(body);
-    setContentView(outer);
+    LinearLayout frame = new LinearLayout(spec.context);
+    frame.setOrientation(LinearLayout.VERTICAL);
+    frame.setPadding(dp(16), dp(12), dp(16), dp(12));
+    frame.setBackground(new Bevel(paper, Color.parseColor("#fffdee"), line, false, dp(1)));
+    frame.addView(header, new LinearLayout.LayoutParams(-1, -2));
+    frame.addView(outer, new LinearLayout.LayoutParams(-1, 0, 1));
+    if (!spec.labels.isEmpty()) frame.addView(actions, new LinearLayout.LayoutParams(-1, -2));
+    setContentView(frame);
     Window window = getWindow();
     window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
     window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);

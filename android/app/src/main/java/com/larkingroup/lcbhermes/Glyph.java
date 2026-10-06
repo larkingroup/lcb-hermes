@@ -27,6 +27,26 @@ final class Glyph extends Drawable {
     p.setStrokeJoin(Paint.Join.ROUND);
     Path path = new Path();
     switch (name) {
+      case "folder":
+        path.moveTo(3, 7);
+        path.lineTo(10, 7);
+        path.lineTo(12, 10);
+        path.lineTo(21, 10);
+        path.lineTo(21, 20);
+        path.lineTo(3, 20);
+        path.close();
+        c.drawPath(path, p);
+        break;
+      case "resource":
+        c.drawRect(6, 6, 18, 18, p);
+        c.drawRect(9, 9, 15, 15, p);
+        for (int i = 8; i <= 16; i += 4) {
+          c.drawLine(i, 3, i, 6, p);
+          c.drawLine(i, 18, i, 21, p);
+          c.drawLine(3, i, 6, i, p);
+          c.drawLine(18, i, 21, i, p);
+        }
+        break;
       case "sidebar":
         c.drawRoundRect(3, 4, 21, 20, 1, 1, p);
         c.drawLine(10, 4, 10, 20, p);
