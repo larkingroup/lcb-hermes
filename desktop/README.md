@@ -10,8 +10,9 @@ such as `https://server:port`, and login. Check private HTTP if your server uses
 The computer button opens connection settings again.
 
 Classic beige interface, separate drafts, images, model selection, requests and export.
-Drag the divider to resize the chat list. Folders keep their state during replies.
-The right pane shows server statistics and activity from Hermes events.
+Drag the dotted divider to resize the chat list, or use View > Wider/Narrower chat list.
+Folders keep their state during replies. The right pane shows resource bars and a
+wrapped activity log from Hermes events.
 Ctrl+Enter sends; Ctrl+N starts a chat; Ctrl+R reconnects.
 
 Workspaces registers existing folders on the server. Choose a folder for new chats;
