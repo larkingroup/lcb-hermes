@@ -93,19 +93,7 @@ final class Attachments {
         if (part == null || !part.optString("type").equals("image_url")) continue;
         JSONObject image = part.optJSONObject("image_url");
         String url = image == null ? part.optString("image_url") : image.optString("url");
-        if (url.startsWith("data:image/") && url.length() < 8 * 1024 * 1024 && url.contains(","))
-          try {
-            byte[] bytes = Base64.decode(url.substring(url.indexOf(',') + 1), Base64.DEFAULT);
-            images.put(
-                Protocol.obj(
-                    "name",
-                    "image",
-                    "mime",
-                    "image/jpeg",
-                    "thumbnail",
-                    thumbnail(bytes, "image/jpeg")));
-          } catch (Exception ignored) {
-          }
+        if (!url.isEmpty()) images.put(Protocol.obj("name","image","mime","image/*"));
       }
     return images;
   }

@@ -5,12 +5,13 @@ if (signingFile.exists()) signingFile.withInputStream { secrets.load(it) }
 android {
     namespace 'com.larkingroup.lcbhermes'
     compileSdk 36
+    buildFeatures { buildConfig true }
     defaultConfig {
         applicationId 'com.larkingroup.lcbhermes'
         minSdk 26
         targetSdk 36
-        versionCode 6
-        versionName '0.3.0'
+        versionCode 7
+        versionName '0.4.7'
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
     signingConfigs { release { if (signingFile.exists()) {

@@ -26,6 +26,18 @@ import org.json.*;
 public final class MainActivity extends Activity implements Controller.Observer {
   Controller c;
   private LinearLayout root, content, transcript, toolsPanel, sidebar, sideList, attachmentTray;
+  private LinearLayout monitorPanel, topBar;
+  private View sidebarDivider;
+  private boolean tightTyping, compactSearch;
+  private LinearLayout sidebarHeading, sidebarFooter;
+  private TextView activityText;
+  private boolean activityExpanded, wizardShown;
+  private String trayState = "";
+  private final Map<JSONObject, LinearLayout> messageBlocks = new IdentityHashMap<>();
+  private ListView chatList;
+  private final List<JSONObject> sidebarRows = new ArrayList<>();
+  private BaseAdapter sidebarAdapter;
+  private final Set<String> collapsedFolders = new HashSet<>();
   private FrameLayout workspace;
   private View drawerScrim;
   private EditText sideSearch;
@@ -34,17 +46,21 @@ public final class MainActivity extends Activity implements Controller.Observer 
   private TextView chatTitle;
   private TextView connection, modelLabel, notice, serverStatus;
   private EditText composer;
-  private Button send, approval;
+  private Button send, approval, folderButton;
+  private LinearLayout chatHeading;
+  private TextView activityHeading;
   private ScrollView chatScroll;
   private final Map<JSONObject, TextView> messageViews = new IdentityHashMap<>();
   private boolean sessionsExpanded;
   private Markwon markdown;
   private int face, paper, shadow, ink, muted, blue, blueInk, accent, accentInk;
   private String page = "chat", theme = "";
+  private String serverPageProfile = "";
   private boolean syncingDraft, needsScroll = true, dialogOpen;
   private boolean followTail = true;
   private boolean modelPickerPending;
-  private Sheet modelDialog;
+  private Sheet modelDialog, requestDialog;
+  private String requestDialogId = "";
   private android.window.OnBackInvokedCallback backCallback;
   private boolean backRegistered, started, statsLoading;
   private final Handler screenHandler = new Handler(Looper.getMainLooper());
@@ -56,7 +72,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
       new Runnable() {
         @Override
         public void run() {
-          if (!started || !page.equals("server")) return;
+          if (!started || statsRows == null) return;
           refreshServerStats();
           screenHandler.postDelayed(this, 5000);
         }
@@ -97,7 +113,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
     started = true;
     c.attach(this);
     updateBackHandler();
-    if (page.equals("server")) startServerStats();
+    if (statsRows != null) startServerStats();
   }
 
   @Override
@@ -162,6 +178,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
     if (Build.VERSION.SDK_INT >= 33 && backRegistered)
       getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(backCallback);
     if (modelDialog != null) modelDialog.dismiss();
+    if (requestDialog != null) requestDialog.dismiss();
     super.onDestroy();
   }
 
@@ -238,17 +255,16 @@ public final class MainActivity extends Activity implements Controller.Observer 
   }
 
   private void colors() {
-    theme = c.data.optString("theme", "light");
-    boolean dark = theme.equals("dark");
-    face = color(dark ? "#1e272e" : "#f0efe7");
-    paper = color(dark ? "#182128" : "#fffefb");
-    shadow = color(dark ? "#38464f" : "#b8c2c4");
-    ink = color(dark ? "#f0f2ed" : "#202e38");
-    muted = color(dark ? "#b8c5ce" : "#50616e");
-    blue = color(dark ? "#354e62" : "#c8ddec");
-    blueInk = color(dark ? "#ecf4fa" : "#203e55");
-    accent = color(dark ? "#456c88" : "#315870");
-    accentInk = color("#fffefb");
+    theme = "light";
+    face = color("#dedac7");
+    paper = color("#fffdee");
+    shadow = color("#8c8b7e");
+    ink = color("#2b302a");
+    muted = color("#5e6350");
+    blue = color("#c0cbb3");
+    blueInk = ink;
+    accent = color("#657855");
+    accentInk = color("#fffdee");
   }
 
   private LinearLayout column() {
@@ -287,8 +303,8 @@ public final class MainActivity extends Activity implements Controller.Observer 
     b.setTextColor(ink);
     b.setMinWidth(0);
     b.setMinimumWidth(0);
-    b.setMinHeight(dp(40));
-    b.setMinimumHeight(dp(40));
+    b.setMinHeight(dp(48));
+    b.setMinimumHeight(dp(48));
     b.setPadding(dp(10), dp(2), dp(10), dp(2));
     buttonColors(b, face, ink);
     b.setOnClickListener(v -> click.run());
@@ -298,8 +314,9 @@ public final class MainActivity extends Activity implements Controller.Observer 
   private void buttonColors(Button b, int fill, int textColor) {
     b.setTextColor(textColor);
     StateListDrawable bg = new StateListDrawable();
-    bg.addState(new int[] {android.R.attr.state_pressed}, surface(blue, 8, true));
-    bg.addState(new int[] {}, surface(fill, 8, true));
+    bg.addState(
+        new int[] {android.R.attr.state_pressed}, new Bevel(blue, paper, shadow, true, dp(1)));
+    bg.addState(new int[] {}, new Bevel(fill, paper, shadow, false, dp(1)));
     b.setBackground(bg);
   }
 
@@ -339,6 +356,28 @@ public final class MainActivity extends Activity implements Controller.Observer 
                 bars.top,
                 gutter() + bars.right,
                 Math.max(bars.bottom, ime.bottom));
+            boolean tight =
+                compact()
+                    && insets.isVisible(WindowInsets.Type.ime())
+                    && composer != null
+                    && page.equals("chat");
+            compactSearch = tight && sideSearch != null && sideSearch.hasFocus();
+            boolean changed = tightTyping != tight;
+            tightTyping = tight;
+            if (topBar != null) topBar.setVisibility(tight ? View.GONE : View.VISIBLE);
+            if (chatHeading != null) chatHeading.setVisibility(tight ? View.GONE : View.VISIBLE);
+            if (modelLabel != null) modelLabel.setVisibility(tight ? View.GONE : View.VISIBLE);
+            if (activityHeading != null)
+              activityHeading.setVisibility(tight ? View.GONE : View.VISIBLE);
+            if (activityText != null && activityHeading != null)
+              activityText.setVisibility(!tight && activityExpanded ? View.VISIBLE : View.GONE);
+            if (monitorPanel != null && monitorPanel.getParent() != null)
+              monitorPanel.setVisibility(!tight && page.equals("chat") ? View.VISIBLE : View.GONE);
+            setSidebarVisible();
+            if (changed) {
+              trayState = "";
+              renderAttachmentTray();
+            }
             return insets;
           });
     if (Build.VERSION.SDK_INT >= 30)
@@ -353,6 +392,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
               WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
                   | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
     LinearLayout bar = row();
+    topBar = bar;
     bar.setPadding(0, dp(8), 0, dp(8));
     if (!wide()) bar.addView(iconButton("sidebar", "choose chat", this::toggleSessions));
     ImageView logo = new ImageView(this);
@@ -362,18 +402,17 @@ public final class MainActivity extends Activity implements Controller.Observer 
     logo.setClipToOutline(true);
     bar.addView(logo, new LinearLayout.LayoutParams(dp(24), dp(24)));
     TextView app = text("lcb-hermes", 16, ink);
+    app.setSingleLine(true);
+    app.setEllipsize(TextUtils.TruncateAt.END);
     app.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
     weighted(bar, app);
     connection = label("offline");
     connection.setSingleLine(true);
     connection.setMaxWidth(dp(140));
     connection.setEllipsize(TextUtils.TruncateAt.END);
-    if (!compact()) bar.addView(connection);
-    bar.addView(
-        iconButton(
-            "server",
-            "server and connection",
-            () -> show(page.equals("server") ? "chat" : "server")));
+    if (wide() && !compact()) bar.addView(connection);
+    bar.addView(iconButton("server", "server and connection", this::serverDropdown));
+    bar.addView(iconButton("more", "Chat menu", this::chatMenu));
     add(root, bar);
     workspace = new FrameLayout(this);
     root.addView(workspace, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -383,15 +422,58 @@ public final class MainActivity extends Activity implements Controller.Observer 
     sidebar = column();
     if (wide()) {
       sessionsExpanded = false;
-      panes.addView(sidebar, new LinearLayout.LayoutParams(dp(224), -1));
+      panes.addView(
+          sidebar,
+          new LinearLayout.LayoutParams(
+              dp(
+                  Math.min(
+                      Math.max(180, c.data.optInt("sidebar_width", 224)),
+                      getResources().getConfiguration().screenWidthDp >= 900
+                          ? getResources().getConfiguration().screenWidthDp - 580
+                          : getResources().getConfiguration().screenWidthDp - 330)),
+              -1));
       View line = new View(this);
+      sidebarDivider = line;
       line.setBackgroundColor(shadow);
-      LinearLayout.LayoutParams edge = new LinearLayout.LayoutParams(dp(1), -1);
+      LinearLayout.LayoutParams edge = new LinearLayout.LayoutParams(dp(10), -1);
       edge.setMargins(dp(8), 0, dp(12), dp(8));
+      line.setBackground(new Bevel(face, paper, shadow, false, dp(1)));
+      line.setContentDescription("resize chats pane");
+      line.setOnTouchListener(
+          (v, event) -> {
+            if (event.getAction() == MotionEvent.ACTION_MOVE) {
+              int[] location = new int[2];
+              panes.getLocationOnScreen(location);
+              int width =
+                  Math.max(
+                      dp(180),
+                      Math.min(
+                          dp(
+                              getResources().getConfiguration().screenWidthDp
+                                  - (monitorPanel != null && monitorPanel.getParent() != null
+                                      ? 580
+                                      : 330)),
+                          (int) event.getRawX() - location[0]));
+              sidebar.getLayoutParams().width = width;
+              sidebar.requestLayout();
+              try {
+                c.data.put("sidebar_width", width / getResources().getDisplayMetrics().density);
+              } catch (JSONException ignored) {
+              }
+            }
+            if (event.getAction() == MotionEvent.ACTION_UP) c.save();
+            return true;
+          });
       panes.addView(line, edge);
     }
     content = column();
     panes.addView(content, new LinearLayout.LayoutParams(0, -1, 1));
+    monitorPanel = column();
+    if (getResources().getConfiguration().screenWidthDp >= 900) {
+      LinearLayout.LayoutParams monitor = new LinearLayout.LayoutParams(dp(220), -1);
+      monitor.setMargins(dp(10), 0, 0, dp(8));
+      panes.addView(monitorPanel, monitor);
+    }
     if (!wide()) {
       drawerScrim = new View(this);
       drawerScrim.setBackgroundColor(0x70000000);
@@ -417,13 +499,15 @@ public final class MainActivity extends Activity implements Controller.Observer 
     GradientDrawable d = new GradientDrawable();
     d.setColor(fill);
     d.setCornerRadius(dp(radius));
-    if (border) d.setStroke(dp(1), shadow);
+    if (border) return new Bevel(fill, paper, shadow, true, dp(1));
     return d;
   }
 
   private Button iconButton(String glyph, String description, Runnable click) {
     Button b = button("", click);
     b.setContentDescription(description);
+    b.setMinWidth(dp(48));
+    b.setMinimumWidth(dp(48));
     b.setPadding(dp(11), dp(11), dp(11), dp(11));
     Glyph icon = new Glyph(glyph, ink);
     icon.setBounds(0, 0, dp(20), dp(20));
@@ -446,7 +530,15 @@ public final class MainActivity extends Activity implements Controller.Observer 
     page = name.equals("server") ? "server" : "chat";
     content.removeAllViews();
     composer = null;
+    modelLabel = null;
+    chatHeading = null;
+    activityHeading = null;
     messageViews.clear();
+    messageBlocks.clear();
+    activityText = null;
+    trayState = "";
+    monitorPanel.removeAllViews();
+    monitorPanel.setVisibility(page.equals("chat") ? View.VISIBLE : View.GONE);
     notice = null;
     attachmentTray = null;
     serverStatus = null;
@@ -464,6 +556,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
 
   private void chat() {
     LinearLayout top = row();
+    chatHeading = top;
     chatTitle = text(c.title, 17, ink);
     chatTitle.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
     chatTitle.setSingleLine(true);
@@ -477,6 +570,44 @@ public final class MainActivity extends Activity implements Controller.Observer 
     modelLabel.setContentDescription("choose model");
     modelLabel.setPadding(dp(4), dp(4), dp(8), dp(7));
     add(content, modelLabel);
+    if (getResources().getConfiguration().screenWidthDp >= 900) {
+      add(monitorPanel, paneHeading("Server monitor"));
+      statsNotice = label("Connect to read server stats.");
+      add(monitorPanel, statsNotice);
+      statsRows = column();
+      add(monitorPanel, statsRows);
+      add(monitorPanel, paneHeading("Hermes activity"));
+      ScrollView activityScroll = new ScrollView(this);
+      activityText = text("Ready", 13, ink);
+      activityText.setBackground(surface(paper, 0, true));
+      activityScroll.addView(activityText);
+      monitorPanel.addView(activityScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+      if (started) startServerStats();
+    } else {
+      TextView heading = paneHeading("Hermes activity  ▸");
+      activityHeading = heading;
+      heading.setMinHeight(dp(40));
+      heading.setContentDescription("expand Hermes activity");
+      heading.setOnClickListener(
+          v -> {
+            activityExpanded = !activityExpanded;
+            heading.setText("Hermes activity  " + (activityExpanded ? "▾" : "▸"));
+            activityText.setVisibility(activityExpanded ? View.VISIBLE : View.GONE);
+          });
+      add(content, heading);
+      activityText = text("Ready", 13, ink);
+      activityText.setMaxLines(compact() ? 3 : 7);
+      activityText.setBackground(surface(paper, 0, true));
+      activityText.setOnClickListener(
+          v ->
+              new Sheet.Builder(this)
+                  .setTitle("Hermes activity")
+                  .setMessage(activityValue())
+                  .setPositiveButton("Close", null)
+                  .show());
+      activityText.setVisibility(activityExpanded ? View.VISIBLE : View.GONE);
+      add(content, activityText);
+    }
     chatScroll = new ScrollView(this);
     chatScroll.setOnScrollChangeListener(
         (view, x, y, oldX, oldY) -> {
@@ -543,7 +674,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
                 c.submit(composer.getText().toString());
               }
             });
-    send.setBackground(surface(accent, 9, false));
+    send.setBackground(new Bevel(accent, paper, shadow, false, dp(1)));
     input.addView(send);
     add(composeBox, input);
     add(content, composeBox);
@@ -579,8 +710,16 @@ public final class MainActivity extends Activity implements Controller.Observer 
 
   private void setSidebarVisible() {
     if (sidebar == null) return;
-    sidebar.setVisibility(wide() || sessionsExpanded ? View.VISIBLE : View.GONE);
-    if (drawerScrim != null) drawerScrim.setVisibility(sessionsExpanded ? View.VISIBLE : View.GONE);
+    sidebar.setVisibility(
+        (!tightTyping || compactSearch) && (wide() || sessionsExpanded) ? View.VISIBLE : View.GONE);
+    if (sidebarDivider != null)
+      sidebarDivider.setVisibility(tightTyping && !compactSearch ? View.GONE : View.VISIBLE);
+    if (sidebarHeading != null)
+      sidebarHeading.setVisibility(compactSearch ? View.GONE : View.VISIBLE);
+    if (sidebarFooter != null)
+      sidebarFooter.setVisibility(compactSearch ? View.GONE : View.VISIBLE);
+    if (drawerScrim != null)
+      drawerScrim.setVisibility(!tightTyping && sessionsExpanded ? View.VISIBLE : View.GONE);
     if (!wide() && content != null)
       content.setImportantForAccessibility(
           sessionsExpanded
@@ -590,14 +729,30 @@ public final class MainActivity extends Activity implements Controller.Observer 
 
   private void buildSidebar() {
     sidebar.setPadding(dp(8), dp(4), dp(8), dp(8));
-    sidebar.setBackground(surface(color(theme.equals("dark") ? "#233039" : "#e6ebe8"), 4, true));
+    sidebar.setBackground(surface(face, 0, true));
     sidebar.setFocusableInTouchMode(true);
     LinearLayout heading = row();
+    sidebarHeading = heading;
     TextView name = text("chats", 14, muted);
     name.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
     weighted(heading, name);
     heading.addView(iconButton("new", "create chat", this::freshChat));
-    if (!wide()) heading.addView(iconButton("close", "hide chats", this::toggleSessions));
+    if (!wide()) {
+      heading.addView(
+          iconButton(
+              "sidebar",
+              "expand chats pane",
+              () -> {
+                int narrow =
+                    dp(Math.min(288, getResources().getConfiguration().screenWidthDp - 56));
+                sidebar.getLayoutParams().width =
+                    sidebar.getLayoutParams().width == narrow
+                        ? dp(getResources().getConfiguration().screenWidthDp - 24)
+                        : narrow;
+                sidebar.requestLayout();
+              }));
+      heading.addView(iconButton("close", "hide chats", this::toggleSessions));
+    }
     add(sidebar, heading);
     sideSearch = new EditText(this);
     sideSearch.setContentDescription("find a chat");
@@ -611,14 +766,104 @@ public final class MainActivity extends Activity implements Controller.Observer 
     sideSearch.setText(chatQuery);
     add(sidebar, sideSearch);
     gap(sidebar, 8);
-    ScrollView scroll = new ScrollView(this);
-    scroll.setFillViewport(true);
-    sideList = column();
-    scroll.addView(sideList);
-    sidebar.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-    TextView footer = label("Hermes · your server");
-    footer.setTypeface(Typeface.MONOSPACE);
-    add(sidebar, footer);
+    chatList = new ListView(this);
+    chatList.setDivider(new ColorDrawable(shadow));
+    chatList.setDividerHeight(dp(1));
+    chatList.setBackground(surface(paper, 0, true));
+    sidebarAdapter =
+        new BaseAdapter() {
+          public int getCount() {
+            return sidebarRows.size();
+          }
+
+          public Object getItem(int position) {
+            return sidebarRows.get(position);
+          }
+
+          public long getItemId(int position) {
+            return sidebarRows.get(position).optString("id").hashCode();
+          }
+
+          public boolean hasStableIds() {
+            return true;
+          }
+
+          public View getView(int position, View recycled, ViewGroup parent) {
+            JSONObject session = sidebarRows.get(position);
+            LinearLayout item =
+                recycled instanceof LinearLayout ? (LinearLayout) recycled : column();
+            if (item.getChildCount() == 0) {
+              add(item, text("", 14, ink));
+              add(item, text("", 11, muted));
+              item.setMinimumHeight(dp(52));
+              item.setPadding(dp(3), dp(4), dp(3), dp(4));
+            }
+            TextView title = (TextView) item.getChildAt(0), meta = (TextView) item.getChildAt(1);
+            String id = session.optString("id"), badge = c.chatBadge(id);
+            boolean group = session.optBoolean("group"), selected = !group && c.sameChat(id);
+            title.setText(
+                group
+                    ? (collapsedFolders.contains(id) ? "▸ " : "▾ ") + session.optString("title")
+                    : session.optString("title", "untitled"));
+            title.setTextColor(!selected && badge.equals("reply") ? color("#1a4da1") : ink);
+            title.setTypeface(
+                Typeface.DEFAULT,
+                selected || group || badge.equals("reply") ? Typeface.BOLD : Typeface.NORMAL);
+            title.setMaxLines(1);
+            title.setEllipsize(TextUtils.TruncateAt.END);
+            String stamp = Workbench.date(session, false), source = session.optString("source");
+            meta.setText(
+                stamp
+                    + (source.isEmpty() ? "" : " · " + source)
+                    + (badge.isEmpty() ? "" : " · " + badge));
+            meta.setVisibility(group || meta.getText().length() == 0 ? View.GONE : View.VISIBLE);
+            item.setBackgroundColor(selected || group ? blue : paper);
+            item.setContentDescription(
+                session.optString("title") + " " + Workbench.date(session, true) + " " + badge);
+            item.setOnClickListener(
+                v -> {
+                  if (group) {
+                    if (!collapsedFolders.remove(id)) collapsedFolders.add(id);
+                    sidebarState = "";
+                    renderSidebar();
+                    return;
+                  }
+                  if (c.submissionPending
+                      || c.uploadsPending > 0
+                      || c.status.equals("loading chat")) {
+                    toast("Wait for this message to finish loading.");
+                    return;
+                  }
+                  if (id.isEmpty()) c.newChat();
+                  else if (!c.sameChat(id)) c.resume(id);
+                  sessionsExpanded = false;
+                  hideKeyboard();
+                  needsScroll = true;
+                  show("chat");
+                });
+            item.setOnLongClickListener(
+                group || id.isEmpty()
+                    ? null
+                    : v -> {
+                      sessionMenu(session);
+                      return true;
+                    });
+            return item;
+          }
+        };
+    chatList.setAdapter(sidebarAdapter);
+    sidebar.addView(chatList, new LinearLayout.LayoutParams(-1, 0, 1));
+    LinearLayout folder = row();
+    folderButton = button("Folder for new chats", this::folderPicker);
+    folderButton.setMaxLines(2);
+    folderButton.setEllipsize(TextUtils.TruncateAt.END);
+    weighted(folder, folderButton);
+    folder.addView(iconButton("folder", "manage workspaces", this::workspaces));
+    sidebarFooter = column();
+    add(sidebarFooter, folder);
+    add(sidebarFooter, label("Hermes · your server"));
+    add(sidebar, sidebarFooter);
+
     sideSearch.addTextChangedListener(
         new TextWatcher() {
           public void beforeTextChanged(CharSequence s, int st, int co, int a) {}
@@ -648,207 +893,151 @@ public final class MainActivity extends Activity implements Controller.Observer 
   }
 
   private void renderSidebar() {
-    if (sideList == null) return;
+    if (chatList == null) return;
     JSONArray catalog = c.sidebarSessions();
     String state =
-        catalog + "|" + c.storedId + "|" + c.title + "|" + chatQuery + "|" + c.sidebarBadges();
+        catalog
+            + "|"
+            + c.storedId
+            + "|"
+            + c.title
+            + "|"
+            + chatQuery
+            + "|"
+            + c.sidebarBadges()
+            + c.chatFolders;
     if (state.equals(sidebarState)) return;
     sidebarState = state;
-    sideList.removeAllViews();
+    int position = chatList.getFirstVisiblePosition();
+    View top = chatList.getChildAt(0);
+    int offset = top == null ? 0 : top.getTop();
+    String anchor = position < sidebarRows.size() ? sidebarRows.get(position).optString("id") : "";
+    sidebarRows.clear();
     String query = chatQuery.toLowerCase(Locale.ROOT).trim();
-    int count = 0;
-    if ("new chat".contains(query)) {
-      addChatEntry(obj("id", "", "title", "new chat"));
-      count++;
+    if ("new chat".contains(query)) sidebarRows.add(obj("id", "", "title", "new chat"));
+    LinkedHashMap<String, List<JSONObject>> groups = new LinkedHashMap<>();
+    boolean activeListed = false;
+    for (int i = 0; i < catalog.length(); i++) {
+      JSONObject row = catalog.optJSONObject(i);
+      if (row == null) continue;
+      activeListed |= c.storedId.equals(row.optString("id"));
+      if (!(row.optString("title") + " " + row.optString("preview"))
+          .toLowerCase(Locale.ROOT)
+          .contains(query)) continue;
+      groups.computeIfAbsent(row.optString("cwd"), k -> new ArrayList<>()).add(row);
     }
-    Set<String> seen = new HashSet<>();
-    boolean listed = false;
-    for (int i = 0; i < catalog.length(); i++)
-      if (catalog.optJSONObject(i) != null
-          && c.storedId.equals(catalog.optJSONObject(i).optString("id"))) listed = true;
-    if (!c.storedId.isEmpty() && !listed) {
-      JSONObject active = obj("id", c.storedId, "title", c.title);
-      if (c.title.toLowerCase(Locale.ROOT).contains(query)) {
-        addChatEntry(active);
-        count++;
-      }
-      seen.add(c.storedId);
+    if (!activeListed && !c.storedId.isEmpty() && c.title.toLowerCase(Locale.ROOT).contains(query))
+      groups
+          .computeIfAbsent(c.cwd, k -> new ArrayList<>())
+          .add(0, obj("id", c.storedId, "title", c.title));
+    for (Map.Entry<String, List<JSONObject>> group : groups.entrySet()) {
+      String key = "folder:" + group.getKey();
+      sidebarRows.add(
+          obj(
+              "id",
+              key,
+              "title",
+              group.getKey().isEmpty()
+                  ? "Unfiled chats"
+                  : c.folders.getOrDefault(group.getKey(), group.getKey()),
+              "group",
+              true));
+      if (!collapsedFolders.contains(key) || !query.isEmpty()) sidebarRows.addAll(group.getValue());
     }
-    JSONArray all = catalog;
-    if (all != null)
-      for (int i = 0; i < all.length(); i++) {
-        JSONObject session = all.optJSONObject(i);
-        if (session == null || !seen.add(session.optString("id"))) continue;
-        if (session.optString("id").equals(c.storedId))
-          session =
-              obj("id", c.storedId, "title", c.title, "preview", session.optString("preview"));
-        String title = session.optString("title", ""), preview = session.optString("preview");
-        if (!(title + " " + preview).toLowerCase(Locale.ROOT).contains(query)) continue;
-        addChatEntry(session);
-        count++;
+    sidebarAdapter.notifyDataSetChanged();
+    for (int i = 0; i < sidebarRows.size(); i++)
+      if (sidebarRows.get(i).optString("id").equals(anchor)) {
+        position = i;
+        break;
       }
-    if (count == 0) add(sideList, label("no matching chats"));
+    chatList.setSelectionFromTop(Math.min(position, Math.max(0, sidebarRows.size() - 1)), offset);
   }
 
-  private void addChatEntry(JSONObject session) {
-    String id = session.optString("id");
-    boolean selected = id.equals(c.storedId);
-    String title = session.optString("title");
-    if (title.isBlank()) title = session.optString("preview", "untitled");
-    if (title.isBlank()) title = "untitled";
-    String badge = c.chatBadge(id);
-    LinearLayout item = row();
-    item.setPadding(dp(4), dp(4), dp(4), dp(4));
-    item.setMinimumHeight(dp(48));
-    item.setBackground(
-        new RippleDrawable(
-            android.content.res.ColorStateList.valueOf(blue),
-            surface(selected ? blue : Color.TRANSPARENT, 4, selected),
-            null));
-    View marker = new View(this);
-    marker.setBackgroundColor(selected ? accent : Color.TRANSPARENT);
-    item.addView(marker, new LinearLayout.LayoutParams(dp(3), dp(24)));
-    TextView name = text(title, 14, selected ? blueInk : ink);
-    name.setMaxLines(2);
-    name.setEllipsize(TextUtils.TruncateAt.END);
-    name.setTypeface(Typeface.DEFAULT, selected ? Typeface.BOLD : Typeface.NORMAL);
-    weighted(item, name);
-    if (!badge.isEmpty()) {
-      TextView status =
-          text(badge.equals("reply") ? "●" : badge.equals("working") ? "◌" : "!", 14, accent);
-      status.setContentDescription(badge);
-      item.addView(status);
-    }
-    item.setContentDescription(title + ", open chat" + (badge.isEmpty() ? "" : ", " + badge));
-    item.setSelected(selected);
-    item.setOnClickListener(
-        v -> {
-          if (c.submissionPending || c.uploadsPending > 0 || c.status.equals("loading chat")) {
-            toast("One moment. Your message is still being sent or loaded.");
-            return;
-          }
-          if (id.isEmpty()) c.newChat();
-          else if (!id.equals(c.storedId)) c.resume(id);
-          sessionsExpanded = false;
-          hideKeyboard();
-          needsScroll = true;
-          show("chat");
-          setSidebarVisible();
-        });
-    if (!id.isEmpty())
-      item.setOnLongClickListener(
-          v -> {
-            sessionMenu(session);
-            return true;
-          });
-    add(sideList, item);
-    gap(sideList, 3);
+  private TextView paneHeading(String title) {
+    TextView heading = text(title, 14, ink);
+    heading.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+    heading.setBackground(new Bevel(blue, paper, shadow, false, dp(1)));
+    return heading;
+  }
+
+  private String activityValue() {
+    StringBuilder value = new StringBuilder();
+    for (String line : c.activity) value.append("• ").append(line).append("\n");
+    return value.length() == 0 ? (c.running ? "Working" : "Ready") : value.toString().trim();
   }
 
   private void renderTranscript() {
     if (transcript == null || !page.equals("chat")) return;
-    boolean bottom =
-        chatScroll.getChildAt(0).getHeight() - chatScroll.getHeight() - chatScroll.getScrollY()
-            < dp(120);
-    transcript.removeAllViews();
-    messageViews.clear();
-    if (c.rows.isEmpty()) {
-      LinearLayout welcome = column();
-      welcome.setGravity(Gravity.CENTER);
-      welcome.setPadding(dp(12), dp(24), dp(12), dp(24));
-      ImageView logo = new ImageView(this);
-      logo.setImageResource(R.drawable.lcb_logo);
-      logo.setBackgroundColor(color("#faf9f1"));
-      welcome.addView(logo, new LinearLayout.LayoutParams(dp(44), dp(44)));
-      gap(welcome, 12);
-      TextView ready = text("what are we working on?", 20, ink);
-      ready.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-      welcome.addView(ready);
-      welcome.addView(
-          text(
-              c.profile() == null
-                  ? "Your phone. Your Hermes server."
-                  : "Ask, browse, build. Hermes does the work.",
-              15,
-              muted));
-      gap(welcome, 12);
-      if (c.profile() == null || c.gateway == null || !c.gateway.online())
-        welcome.addView(
-            button(
-                c.profile() == null ? "connect a server" : "reconnect",
-                () -> {
-                  if (c.profile() == null) loginDialog();
-                  else c.connectSaved();
-                }));
-      if (c.profile() == null) welcome.addView(button("look around", c::demo));
-      add(transcript, welcome);
-    }
-    int shown = 0;
+    int oldY = chatScroll.getScrollY();
+    List<JSONObject> visible = new ArrayList<>();
     for (int i = Math.max(0, c.rows.size() - 160); i < c.rows.size(); i++) {
       JSONObject item = c.rows.get(i);
       String role = item.optString("role"), body = Attachments.displayText(item);
+      JSONArray media = Attachments.forRow(item);
       if (!(role.equals("user") || role.equals("assistant"))
-          || (body.trim().isEmpty() && item.optJSONArray("attachments") == null)) continue;
-      LinearLayout block = column();
-      block.setBackground(surface(role.equals("user") ? blue : paper, 10, true));
-      block.setPadding(dp(4), dp(4), dp(4), dp(4));
-      LinearLayout meta = row();
-      TextView who = label(role.equals("user") ? "you" : "hermes");
-      who.setTextColor(role.equals("user") ? blueInk : muted);
-      weighted(meta, who);
-      TextView copy = text("copy", 12, muted);
-      copy.setPadding(dp(10), dp(7), dp(10), dp(7));
-      copy.setContentDescription("copy " + role + " message");
-      copy.setOnClickListener(v -> copy(Attachments.displayText(item)));
-      meta.addView(copy);
-      add(block, meta);
-      renderImages(block, Attachments.forRow(item), false);
-      TextView bodyView = text(body, 16, ink);
-      bodyView.setTextIsSelectable(true);
-      bodyView.setBackgroundColor(Color.TRANSPARENT);
-      bodyView.setLineSpacing(dp(1), 1);
-      markdown.setMarkdown(bodyView, body);
-      add(block, bodyView);
-      messageViews.put(item, bodyView);
-      add(transcript, block);
-      gap(transcript, 8);
-      shown++;
-    }
-    toolsPanel = column();
-    if (!c.tools.isEmpty()) {
-      TextView cap = label("tools · " + c.tools.size());
-      add(toolsPanel, cap);
-      for (JSONObject tool : c.tools.values()) {
-        String name = tool.optString("name", "tool");
-        String summary = tool.optString("summary", tool.optString("context", ""));
-        if (summary.length() > 90) summary = summary.substring(0, 90) + "…";
-        Button b =
-            button(
-                (tool.optBoolean("done") ? "✓ " : "· ")
-                    + name
-                    + (summary.isEmpty() ? "" : "   " + summary),
-                () -> toolDetails(tool));
-        b.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-        b.setTextSize(13);
-        add(toolsPanel, b);
-        gap(toolsPanel, 3);
+          || (body.isBlank() && (media == null || media.length() == 0))) continue;
+      visible.add(item);
+      LinearLayout block = messageBlocks.get(item);
+      if (block == null) {
+        block = column();
+        block.setPadding(dp(4), dp(4), dp(4), dp(8));
+        block.setBackground(surface(paper, 0, true));
+        LinearLayout meta = row();
+        TextView who = text(role.equals("user") ? "You" : "Hermes", 13, ink);
+        who.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        weighted(meta, who);
+        TextView copy = text("Copy", 12, muted);
+        copy.setMinHeight(dp(40));
+        copy.setGravity(Gravity.CENTER);
+        copy.setContentDescription("copy " + role + " message");
+        copy.setOnClickListener(v -> copy(Attachments.displayText(item)));
+        meta.addView(copy);
+        meta.setBackgroundColor(blue);
+        add(block, meta);
+        if (media != null)
+          for (int j = 0; j < media.length(); j++) {
+            JSONObject file = media.optJSONObject(j);
+            if (file != null) add(block, label("Attachment · " + file.optString("name", "image")));
+          }
+        TextView bodyView = text(body, 16, ink);
+        bodyView.setTextIsSelectable(true);
+        bodyView.setBackgroundColor(Color.TRANSPARENT);
+        bodyView.setLineSpacing(dp(1), 1);
+        add(block, bodyView);
+        messageViews.put(item, bodyView);
+        messageBlocks.put(item, block);
+        LinearLayout.LayoutParams spacing = new LinearLayout.LayoutParams(-1, -2);
+        spacing.bottomMargin = dp(6);
+        block.setLayoutParams(spacing);
       }
-      add(transcript, toolsPanel);
+      TextView bodyView = messageViews.get(item);
+      if (!body.equals(bodyView.getTag())) {
+        markdown.setMarkdown(bodyView, body);
+        bodyView.setTag(body);
+      }
     }
-    if (c.running) {
-      TextView working = label("· working…");
-      add(transcript, working);
+    for (JSONObject removed : new ArrayList<>(messageBlocks.keySet()))
+      if (!visible.contains(removed)) {
+        transcript.removeView(messageBlocks.remove(removed));
+        messageViews.remove(removed);
+      }
+    for (int i = 0; i < visible.size(); i++) {
+      View block = messageBlocks.get(visible.get(i));
+      if (transcript.indexOfChild(block) != i) {
+        transcript.removeView(block);
+        transcript.addView(block, i);
+      }
     }
-    if (needsScroll || bottom || followTail) {
+    if (needsScroll || followTail) {
       chatScroll.post(() -> chatScroll.fullScroll(View.FOCUS_DOWN));
       needsScroll = false;
-    }
+    } else chatScroll.post(() -> chatScroll.scrollTo(0, oldY));
   }
 
   @Override
   public void changed(boolean structure) {
     if (isFinishing() || isDestroyed()) return;
-    if (!theme.equals(c.data.optString("theme", "light"))) {
+    if (!theme.equals("light")) {
       build();
       return;
     }
@@ -856,20 +1045,38 @@ public final class MainActivity extends Activity implements Controller.Observer 
   }
 
   private void update(boolean structure) {
+    if (requestDialog != null && !c.requests.containsKey(requestDialogId)) requestDialog.dismiss();
     routeNotification();
+    if (c.loaded && c.profile() == null && !c.demo && !wizardShown) {
+      wizardShown = true;
+      root.post(this::loginDialog);
+    }
     JSONObject p = c.profile();
     connection.setText(
         (p == null ? "no server" : p.optString("name"))
             + "  ·  "
             + (c.running ? "working" : c.status));
     renderSidebar();
+    if (folderButton != null) {
+      String folder = c.newCwd.isEmpty() ? "Server default folder" : c.newCwd;
+      folderButton.setText(folder);
+      folderButton.setContentDescription("Folder for new chats: " + folder);
+    }
     if (!page.equals("chat")) {
+      if (!serverPageProfile.equals(c.profileId)) {
+        show("server");
+        return;
+      }
       if (serverStatus != null) serverStatus.setText(c.status);
       return;
     }
     setSidebarVisible();
     chatTitle.setText(c.title);
-    modelLabel.setText((c.model.isEmpty() ? "server default" : c.model) + "  ⌄");
+    modelLabel.setText(
+        (c.model.isEmpty() ? "Server default: " + c.defaultModel : c.model)
+            + (c.reasoning.isEmpty() ? "" : " · " + c.reasoning)
+            + "  ▾");
+    if (activityText != null) activityText.setText(activityValue());
     if (notice != null) {
       String n = c.notice;
       notice.setText(n);
@@ -891,64 +1098,292 @@ public final class MainActivity extends Activity implements Controller.Observer 
       composer.setSelection(composer.length());
       syncingDraft = false;
     }
-    if (structure) renderTranscript();
-    else
-      for (Map.Entry<JSONObject, TextView> e : messageViews.entrySet()) {
-        String value = Attachments.displayText(e.getKey());
-        if (!value.equals(e.getValue().getTag())) {
-          markdown.setMarkdown(e.getValue(), value);
-          e.getValue().setTag(value);
-        }
-      }
-    if (!structure && c.running && followTail)
-      chatScroll.post(() -> chatScroll.fullScroll(View.FOCUS_DOWN));
+    renderTranscript();
   }
 
   private void about() {
+    LinearLayout body = column();
+    LinearLayout logos = row();
+    ImageView lcb = new ImageView(this);
+    lcb.setImageResource(R.drawable.lcb_logo);
+    logos.addView(lcb, new LinearLayout.LayoutParams(dp(48), dp(48)));
+    weighted(logos, text("lcb-hermes\n" + BuildConfig.VERSION_NAME, 18, ink));
+    add(body, logos);
+    gap(body, 16);
+    ImageView nous = new ImageView(this);
+    nous.setImageResource(R.drawable.nous_logo);
+    nous.setAdjustViewBounds(true);
+    nous.setContentDescription("Nous Research");
+    body.addView(nous, new LinearLayout.LayoutParams(-1, dp(80)));
+    add(
+        body,
+        text(
+            "Powered by Hermes Agent\nWith thanks to Nous Research and the Hermes team.", 14, ink));
+    TextView link = text("Hermes documentation", 14, muted);
+    link.setMinHeight(dp(48));
+    link.setOnClickListener(v -> openLink("https://hermes-agent.nousresearch.com/docs/"));
+    add(body, link);
+    add(
+        body,
+        label(
+            "No ads, purchases, or analytics. Messages go to your server. Voice input uses"
+                + " Android’s speech provider."));
     new Sheet.Builder(this)
-        .setTitle("lcb-hermes 0.3.0")
-        .setMessage(
-            "A small client for Hermes.\n\n"
-                + "No ads. No purchases. No analytics.\n\n"
-                + "Messages go to your server. Voice input uses Android's speech provider.")
-        .setPositiveButton("okay", null)
-        .setNeutralButton("licenses", (x, y) -> licenses())
+        .setTitle("About lcb-hermes")
+        .setView(body)
+        .setPositiveButton("Close", null)
+        .setNeutralButton("Licenses", (d, n) -> licenses())
+        .show();
+  }
+
+  private void chatMenu() {
+    new Sheet.Builder(this)
+        .setTitle("Chat")
+        .setItems(
+            new String[] {
+              "New chat",
+              "Model and effort…",
+              "Workspaces…",
+              "Export chat…",
+              "Rename or delete…",
+              "About…",
+              "Recover saved draft…"
+            },
+            (d, n) -> {
+              switch (n) {
+                case 0:
+                  freshChat();
+                  break;
+                case 1:
+                  models();
+                  break;
+                case 2:
+                  workspaces();
+                  break;
+                case 3:
+                  exportChat();
+                  break;
+                case 4:
+                  if (c.gateway != null && c.gateway.online() && !c.storedId.isEmpty())
+                    sessionMenu(obj("id", c.storedId, "title", c.title));
+                  break;
+                case 5:
+                  about();
+                  break;
+                case 6:
+                  recoverDraft();
+                  break;
+              }
+            })
+        .show();
+  }
+
+  private void recoverDraft() {
+    JSONObject profile = c.profile();
+    JSONArray drafts = profile == null ? null : profile.optJSONArray("retained_drafts");
+    if (drafts == null || drafts.length() == 0) {
+      toast("No recovered drafts.");
+      return;
+    }
+    List<String> labels = new ArrayList<>();
+    for (int i = 0; i < drafts.length(); i++) {
+      JSONObject saved = drafts.optJSONObject(i);
+      JSONObject draft = saved == null ? null : saved.optJSONObject("draft");
+      labels.add(draft == null ? "Saved draft" : draft.optString("text", "Attachments"));
+    }
+    new Sheet.Builder(this)
+        .setTitle("Recovered drafts")
+        .setItems(
+            labels.toArray(new String[0]),
+            (d, n) -> {
+              JSONObject saved = drafts.optJSONObject(n),
+                  draft = saved == null ? null : saved.optJSONObject("draft");
+              if (draft == null) return;
+              new Sheet.Builder(this)
+                  .setTitle("Saved draft")
+                  .setMessage(draft.optString("text"))
+                  .setPositiveButton("Copy text", (x, y) -> copy(draft.optString("text")))
+                  .setNegativeButton("Close", null)
+                  .show();
+            })
+        .show();
+  }
+
+  private void serverDropdown() {
+    List<JSONObject> servers = new ArrayList<>();
+    List<String> names = new ArrayList<>();
+    for (int i = 0; i < c.profiles().length(); i++) {
+      JSONObject p = c.profiles().optJSONObject(i);
+      if (p != null && !p.optBoolean("hidden")) {
+        servers.add(p);
+        names.add((p.optString("id").equals(c.profileId) ? "✓ " : "") + p.optString("name"));
+      }
+    }
+    int count = servers.size();
+    names.add("Server monitor…");
+    names.add("Server manager…");
+    names.add("Add server…");
+    new Sheet.Builder(this)
+        .setTitle("Servers")
+        .setItems(
+            names.toArray(new String[0]),
+            (d, n) -> {
+              if (n < count) {
+                c.select(servers.get(n).optString("id"));
+                show("chat");
+              } else if (n == count) show("server");
+              else if (n == count + 1) menu();
+              else loginDialog();
+            })
         .show();
   }
 
   private void menu() {
     new Sheet.Builder(this)
-        .setTitle("server options")
+        .setTitle("Server manager")
+        .setMessage(c.profile() == null ? "Add your Hermes server." : c.profile().optString("name"))
         .setItems(
-            new String[] {"reconnect", "export chat", "forget this server", "licenses"},
+            new String[] {
+              "Choose server…", "Add server…", "Reconnect", "Remove saved server…", "About…"
+            },
             (d, n) -> {
-              switch (n) {
-                case 0:
-                  if (c.profile() == null) loginDialog();
-                  else {
-                    c.reconnect();
-                  }
-                  break;
-                case 1:
-                  exportChat();
-                  break;
-                case 2:
-                  if (c.profile() != null)
-                    new Sheet.Builder(this)
-                        .setTitle("forget this server?")
-                        .setMessage(
-                            "Remove its saved login, draft, and cached chat from this phone. Server"
-                                + " chats stay there.")
-                        .setNegativeButton("cancel", null)
-                        .setPositiveButton("forget", (x, y) -> c.forget())
-                        .show();
-                  break;
-                case 3:
-                  licenses();
-                  break;
-              }
+              if (n == 0) profiles();
+              else if (n == 1) loginDialog();
+              else if (n == 2) c.reconnect();
+              else if (n == 3 && c.profile() != null)
+                new Sheet.Builder(this)
+                    .setTitle("Remove saved server?")
+                    .setMessage(
+                        "Remove its saved login from this phone. Drafts and cached history are"
+                            + " retained; add this server again to recover them.")
+                    .setNegativeButton("Cancel", null)
+                    .setPositiveButton("Remove", (x, y) -> c.forget())
+                    .show();
+              else if (n == 4) about();
             })
         .show();
+  }
+
+  private void folderPicker() {
+    List<String> paths = new ArrayList<>();
+    List<String> labels = new ArrayList<>();
+    paths.add("");
+    labels.add("Server default folder");
+    for (Map.Entry<String, String> folder : c.folders.entrySet()) {
+      paths.add(folder.getKey());
+      labels.add(folder.getValue());
+    }
+    new Sheet.Builder(this)
+        .setTitle("Folder for new chats")
+        .setItems(labels.toArray(new String[0]), (d, n) -> c.chooseFolder(paths.get(n)))
+        .setNeutralButton("Workspaces…", (d, n) -> workspaces())
+        .show();
+  }
+
+  private void workspaces() {
+    if (c.gateway == null || !c.gateway.online()) {
+      toast("Connect to manage server workspaces.");
+      return;
+    }
+    List<String> labels = new ArrayList<>();
+    List<JSONObject> projects = new ArrayList<>();
+    for (int i = 0; i < c.projects.length(); i++) {
+      JSONObject p = c.projects.optJSONObject(i);
+      if (p != null && !p.optBoolean("archived")) {
+        labels.add(p.optString("name", p.optString("slug")));
+        projects.add(p);
+      }
+    }
+    labels.add("Register workspace…");
+    labels.add("Choose folder for new chats…");
+    int count = projects.size();
+    new Sheet.Builder(this)
+        .setTitle("Server workspaces")
+        .setItems(
+            labels.toArray(new String[0]),
+            (d, n) -> {
+              if (n == count + 1) folderPicker();
+              else workspaceEditor(n < count ? projects.get(n) : null);
+            })
+        .setNeutralButton("Refresh", (d, n) -> c.refreshWorkspaces())
+        .show();
+  }
+
+  private void workspaceEditor(JSONObject project) {
+    LinearLayout body = column();
+    EditText name = project == null ? field(body, "Workspace name", "", false) : null;
+    if (project != null)
+      add(
+          body,
+          text(
+              project.optJSONArray("folders") == null
+                  ? ""
+                  : project.optJSONArray("folders").toString(),
+              13,
+              muted));
+    EditText path = field(body, "Existing folder on the server", "", false);
+    add(body, label("Use a folder that already exists on your Hermes server."));
+    TextView error = label("");
+    add(body, error);
+    Gateway source = c.gateway;
+    Sheet dialog =
+        new Sheet.Builder(this)
+            .setTitle(
+                project == null
+                    ? "Register workspace"
+                    : "Attach folder to " + project.optString("name"))
+            .setView(body)
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Save", null)
+            .create();
+    dialog.setOnShowListener(
+        d ->
+            dialog
+                .getButton(-1)
+                .setOnClickListener(
+                    v -> {
+                      String folder = path.getText().toString().trim();
+                      if (folder.isEmpty()) {
+                        error.setText("Enter an existing server folder.");
+                        return;
+                      }
+                      JSONObject params =
+                          project == null
+                              ? obj(
+                                  "name",
+                                  name.getText().toString().trim(),
+                                  "folders",
+                                  new JSONArray().put(folder),
+                                  "primary_path",
+                                  folder)
+                              : obj(
+                                  "id",
+                                  project.optString("id"),
+                                  "path",
+                                  folder,
+                                  "is_primary",
+                                  false);
+                      if (project == null && name.getText().toString().trim().isEmpty()) {
+                        error.setText("Enter a workspace name.");
+                        return;
+                      }
+                      dialog.getButton(-1).setEnabled(false);
+                      source.rpc(
+                          project == null ? "projects.create" : "projects.add_folder",
+                          params,
+                          (r, e) -> {
+                            if (source != c.gateway || isDestroyed()) return;
+                            if (e != null) {
+                              error.setText(e);
+                              dialog.getButton(-1).setEnabled(true);
+                            } else {
+                              c.chooseFolder(folder);
+                              c.refreshWorkspaces();
+                              dialog.dismiss();
+                            }
+                          });
+                    }));
+    dialog.show();
   }
 
   private EditText field(LinearLayout box, String hint, String value, boolean password) {
@@ -1002,22 +1437,20 @@ public final class MainActivity extends Activity implements Controller.Observer 
     box.setPadding(0, 0, 0, 0);
     EditText name = field(box, "server name", "", false);
     JSONObject current = c.profile();
-    EditText url =
-        field(box, "dashboard URL", current == null ? "" : current.optString("url"), false);
+    EditText url = field(box, "dashboard URL", "", false);
     url.setInputType(
         android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
-    EditText user =
-        field(box, "username", current == null ? "" : current.optString("username"), false);
+    EditText user = field(box, "username", "", false);
     EditText pass = field(box, "password", "", true);
     name.setHint("a name for this server");
-    url.setHint("http(s)://your-server");
+    url.setHint("https://server:port");
     user.setHint("");
     pass.setHint("");
     CheckBox http = new CheckBox(this);
     http.setText("allow private HTTP (try automatically)");
     http.setTextSize(13);
     http.setTextColor(ink);
-    http.setChecked(current != null && current.optBoolean("http"));
+    http.setChecked(false);
     add(box, http);
     TextView explanation =
         text("Use your dashboard login. Model providers are configured on your server.", 13, muted);
@@ -1066,22 +1499,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
   }
 
   private void profiles() {
-    JSONArray list = c.profiles();
-    String[] names = new String[list.length() + 1];
-    for (int i = 0; i < list.length(); i++) names[i] = list.optJSONObject(i).optString("name");
-    names[list.length()] = "+ add server";
-    new Sheet.Builder(this)
-        .setTitle("servers")
-        .setItems(
-            names,
-            (d, n) -> {
-              if (n == list.length()) loginDialog();
-              else {
-                c.select(list.optJSONObject(n).optString("id"));
-                show("chat");
-              }
-            })
-        .show();
+    serverDropdown();
   }
 
   private void sessionMenu(JSONObject session) {
@@ -1147,74 +1565,156 @@ public final class MainActivity extends Activity implements Controller.Observer 
     }
     modelPickerPending = true;
     Gateway source = c.gateway;
+    String chat = c.storedId;
     source.rpc(
         "model.options",
         obj("include_unconfigured", false),
-        (v, e) -> {
+        (options, e) -> {
           modelPickerPending = false;
-          if (isFinishing() || isDestroyed() || source != c.gateway) return;
+          if (source != c.gateway || isDestroyed() || !chat.equals(c.storedId)) return;
           if (e != null) {
             toast(e);
             return;
           }
-          ArrayList<String> labels = new ArrayList<>(),
-              models = new ArrayList<>(),
-              providers = new ArrayList<>();
-          labels.add("server default");
-          models.add("");
-          providers.add("");
-          JSONArray ps = v.optJSONArray("providers");
-          if (ps != null)
-            for (int i = 0; i < ps.length(); i++) {
-              JSONObject p = ps.optJSONObject(i);
-              if (p == null || !p.optBoolean("authenticated", p.optBoolean("is_current"))) continue;
-              JSONArray ms = p.optJSONArray("models");
-              if (ms != null)
-                for (int j = 0; j < ms.length(); j++) {
-                  String m = ms.optString(j);
-                  if (m.isEmpty()) continue;
-                  labels.add(m + "\n" + p.optString("name", p.optString("slug")));
-                  models.add(m);
-                  providers.add(p.optString("slug"));
+          List<JSONObject> all = Workbench.models(options, c.defaultModel),
+              filtered = new ArrayList<>(all);
+          LinearLayout body = column();
+          EditText search = field(body, "Search models and providers", "", false);
+          ListView list = new ListView(this);
+          add(body, list);
+          list.getLayoutParams().height = dp(compact() ? 140 : 260);
+          TextView detail = label("Select a model. Changes apply to this chat.");
+          add(body, detail);
+          Spinner effort = new Spinner(this);
+          effort.setContentDescription("reasoning effort");
+          add(body, effort);
+          JSONObject[] choice = {null};
+          List<String> levels = new ArrayList<>();
+          ArrayAdapter<String> adapter =
+              new ArrayAdapter<>(
+                  this, android.R.layout.simple_list_item_activated_1, new ArrayList<>());
+          Runnable fill =
+              () -> {
+                adapter.clear();
+                for (JSONObject m : filtered)
+                  adapter.add(m.optString("label") + "\n" + m.optString("provider"));
+                adapter.notifyDataSetChanged();
+              };
+          list.setAdapter(adapter);
+          list.setChoiceMode(ListView.CHOICE_MODE_SINGLE);
+          fill.run();
+          java.util.function.Consumer<JSONObject> select =
+              m -> {
+                choice[0] = m;
+                levels.clear();
+                levels.addAll(Workbench.efforts(m, c.defaultModel));
+                List<String> labels = new ArrayList<>();
+                for (String level : levels)
+                  labels.add(
+                      level.isEmpty()
+                          ? (chat.isEmpty() ? "Server default effort" : "Keep current effort")
+                          : level.equals("xhigh")
+                              ? "Extra high"
+                              : level.equals("max") ? "Maximum" : level);
+                effort.setAdapter(
+                    new ArrayAdapter<>(
+                        this, android.R.layout.simple_spinner_dropdown_item, labels));
+                effort.setSelection(Math.max(0, levels.indexOf(c.reasoning)));
+                effort.setEnabled(levels.size() > 1);
+                detail.setText(
+                    m.optString("label")
+                        + " · "
+                        + m.optString("provider")
+                        + (c.running ? "\nApplies to the next turn." : "\nApplies to this chat.")
+                        + (levels.size() == 1 ? " No reasoning control reported." : ""));
+              };
+          list.setOnItemClickListener((parent, v, n, id) -> select.accept(filtered.get(n)));
+          search.addTextChangedListener(
+              new TextWatcher() {
+                public void beforeTextChanged(CharSequence t, int a, int b, int d) {}
+
+                public void afterTextChanged(Editable t) {}
+
+                public void onTextChanged(CharSequence t, int a, int b, int d) {
+                  filtered.clear();
+                  for (JSONObject m : all)
+                    if ((m.optString("label") + m.optString("provider"))
+                        .toLowerCase(Locale.ROOT)
+                        .contains(t.toString().toLowerCase(Locale.ROOT))) filtered.add(m);
+                  fill.run();
                 }
+              });
+          for (int i = 0; i < all.size(); i++)
+            if (all.get(i).optString("model").equals(c.model)
+                && (c.provider.isEmpty() || all.get(i).optString("provider").equals(c.provider))) {
+              select.accept(all.get(i));
+              list.setItemChecked(i, true);
+              list.setSelection(i);
+              break;
             }
           modelDialog =
               new Sheet.Builder(this)
-                  .setTitle("model for a new chat")
-                  .setItems(
-                      labels.toArray(new String[0]),
-                      (d, n) -> {
-                        if (c.running || c.submissionPending) {
-                          toast("Finish this task first.");
-                          return;
-                        }
-                        if (!c.sessionId.isEmpty() || !c.rows.isEmpty())
-                          new Sheet.Builder(this)
-                              .setTitle("start a new chat?")
-                              .setMessage(
-                                  "Use "
-                                      + (models.get(n).isEmpty()
-                                          ? "the server default"
-                                          : models.get(n))
-                                      + " in a new session. This chat is saved on the server.")
-                              .setNegativeButton("cancel", null)
-                              .setPositiveButton(
-                                  "new chat",
-                                  (x, y) -> {
-                                    c.newModel = models.get(n);
-                                    c.newProvider = providers.get(n);
-                                    c.newChat();
-                                    show("chat");
-                                  })
-                              .show();
-                        else {
-                          c.newModel = models.get(n);
-                          c.newProvider = providers.get(n);
-                          c.model = c.newModel;
-                          update(false);
-                        }
-                      })
-                  .show();
+                  .setTitle("Model and effort")
+                  .setView(body)
+                  .setNegativeButton("Cancel", null)
+                  .setPositiveButton("Apply", null)
+                  .create();
+          modelDialog.setOnShowListener(
+              d ->
+                  modelDialog
+                      .getButton(-1)
+                      .setOnClickListener(
+                          v -> {
+                            if (choice[0] == null) {
+                              detail.setText("Select a model first.");
+                              return;
+                            }
+                            if (source != c.gateway || !chat.equals(c.storedId)) {
+                              detail.setText("Chat changed. Reopen this picker.");
+                              return;
+                            }
+                            applyModel(
+                                choice[0],
+                                levels.get(effort.getSelectedItemPosition()),
+                                false,
+                                detail);
+                          }));
+          modelDialog.show();
+        });
+  }
+
+  private void applyModel(JSONObject choice, String effort, boolean confirmed, TextView detail) {
+    String chat = c.storedId;
+    Gateway source = c.gateway;
+    modelDialog.getButton(-1).setEnabled(false);
+    c.chooseModel(
+        choice.optString("model"),
+        choice.optString("provider"),
+        effort,
+        confirmed,
+        (v, e) -> {
+          if (isDestroyed() || modelDialog == null || !modelDialog.isShowing()) return;
+          modelDialog.getButton(-1).setEnabled(true);
+          if (e != null) {
+            detail.setText(e);
+            return;
+          }
+          if (v.optBoolean("confirm_required"))
+            new Sheet.Builder(this)
+                .setTitle("Confirm model selection")
+                .setMessage(
+                    v.optString(
+                        "confirm_message",
+                        v.optString("warning", "Confirm this model’s cost before continuing.")))
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton(
+                    "Confirm",
+                    (d, n) -> {
+                      if (source == c.gateway && chat.equals(c.storedId))
+                        applyModel(choice, effort, true, detail);
+                    })
+                .show();
+          else modelDialog.dismiss();
         });
   }
 
@@ -1327,7 +1827,29 @@ public final class MainActivity extends Activity implements Controller.Observer 
 
   private void renderAttachmentTray() {
     if (attachmentTray == null) return;
+    String state =
+        c.storedId + c.attachments + "|" + c.uploadsPending + "|" + c.running + c.submissionPending;
+    if (state.equals(trayState)) return;
+    trayState = state;
     attachmentTray.removeAllViews();
+    if (tightTyping) {
+      if (c.attachments.length() > 0 || c.uploadsPending > 0) {
+        TextView summary =
+            label(
+                c.attachments.length()
+                    + " attachment"
+                    + (c.attachments.length() == 1 ? "" : "s")
+                    + (c.uploadsPending > 0 ? " · loading…" : " · view"));
+        summary.setSingleLine(true);
+        summary.setEllipsize(TextUtils.TruncateAt.END);
+        summary.setContentDescription("view draft attachments");
+        summary.setOnClickListener(v -> hideKeyboard());
+        add(attachmentTray, summary);
+        attachmentTray.setVisibility(View.VISIBLE);
+      } else attachmentTray.setVisibility(View.GONE);
+      return;
+    }
+    if (c.attachments.length() > 0) add(attachmentTray, paneHeading("Attachments"));
     renderImages(attachmentTray, c.attachments, true);
     if (c.uploadsPending > 0) add(attachmentTray, label("loading attachment…"));
     attachmentTray.setVisibility(
@@ -1337,29 +1859,25 @@ public final class MainActivity extends Activity implements Controller.Observer 
   private void renderImages(LinearLayout parent, JSONArray attachments, boolean pending) {
     if (attachments == null || attachments.length() == 0) return;
     HorizontalScrollView scroll = new HorizontalScrollView(this);
-    scroll.setHorizontalScrollBarEnabled(false);
-    LinearLayout images = row();
-    scroll.addView(images);
+    scroll.setHorizontalScrollBarEnabled(true);
+    LinearLayout tiles = row();
+    scroll.addView(tiles);
     add(parent, scroll);
     for (int i = 0; i < attachments.length(); i++) {
-      JSONObject a = attachments.optJSONObject(i);
-      if (a == null) continue;
-      LinearLayout tile = column();
-      tile.setPadding(dp(4), dp(4), dp(4), dp(4));
-      Bitmap bitmap = Attachments.bitmap(a);
-      if (bitmap != null) {
-        ImageView image = new ImageView(this);
-        image.setImageBitmap(bitmap);
-        image.setScaleType(
-            pending ? ImageView.ScaleType.CENTER_CROP : ImageView.ScaleType.FIT_CENTER);
-        image.setBackground(surface(paper, 8, true));
-        image.setClipToOutline(true);
-        image.setContentDescription(
-            (pending ? "attachment preview: " : "attached image: ") + a.optString("name", "image"));
-        float ratio = (float) bitmap.getWidth() / bitmap.getHeight();
-        int width = pending ? 82 : Math.min(240, Math.round(220 * ratio));
-        int height = pending ? 74 : Math.min(220, Math.round(width / ratio));
-        tile.addView(image, new LinearLayout.LayoutParams(dp(width), dp(height)));
+      JSONObject file = attachments.optJSONObject(i);
+      if (file == null) continue;
+      LinearLayout tile = row();
+      tile.setPadding(dp(4), dp(4), dp(6), dp(4));
+      tile.setBackground(surface(paper, 0, true));
+      Bitmap bitmap = Attachments.bitmap(file);
+      ImageView image = new ImageView(this);
+      if (bitmap != null) image.setImageBitmap(bitmap);
+      else image.setImageDrawable(new Glyph("attach", ink));
+      image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+      image.setContentDescription("attachment preview: " + file.optString("name"));
+      tile.addView(
+          image, new LinearLayout.LayoutParams(dp(compact() ? 40 : 64), dp(compact() ? 40 : 56)));
+      if (bitmap != null)
         image.setOnClickListener(
             v -> {
               ImageView full = new ImageView(this);
@@ -1367,28 +1885,26 @@ public final class MainActivity extends Activity implements Controller.Observer 
               full.setAdjustViewBounds(true);
               full.setMaxHeight(dp(460));
               new Sheet.Builder(this)
-                  .setTitle(a.optString("name", "image"))
+                  .setTitle(file.optString("name", "image"))
                   .setView(full)
-                  .setPositiveButton("done", null)
+                  .setPositiveButton("Close", null)
                   .show();
             });
-      } else {
-        TextView file = text(a.optString("name", "file"), 13, ink);
-        file.setMaxLines(2);
-        file.setEllipsize(TextUtils.TruncateAt.END);
-        file.setBackground(surface(blue, 8, false));
-        file.setMinHeight(dp(52));
-        tile.addView(file, new LinearLayout.LayoutParams(dp(140), -2));
-      }
-      if (pending) {
-        TextView remove = text("remove", 11, muted);
-        remove.setGravity(Gravity.CENTER);
-        remove.setPadding(0, dp(6), 0, dp(6));
-        remove.setContentDescription("remove attachment " + a.optString("name"));
-        remove.setOnClickListener(v -> c.removeAttachment(a.optString("id")));
-        add(tile, remove);
-      }
-      images.addView(tile);
+      TextView name = text(file.optString("name", "file"), 13, ink);
+      name.setMaxLines(2);
+      name.setMaxWidth(dp(150));
+      name.setEllipsize(TextUtils.TruncateAt.END);
+      tile.addView(name);
+      Button remove =
+          iconButton(
+              "close",
+              "remove attachment " + file.optString("name"),
+              () -> c.removeAttachment(file.optString("id")));
+      remove.setEnabled(!c.running && !c.submissionPending);
+      tile.addView(remove);
+      LinearLayout.LayoutParams space = new LinearLayout.LayoutParams(-2, -2);
+      space.rightMargin = dp(6);
+      tiles.addView(tile, space);
     }
   }
 
@@ -1417,6 +1933,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
   }
 
   private void server() {
+    serverPageProfile = c.profileId;
     LinearLayout top = row();
     top.addView(iconButton("back", "back to chat", () -> show("chat")));
     weighted(top, text("server", 18, ink));
@@ -1426,31 +1943,18 @@ public final class MainActivity extends Activity implements Controller.Observer 
     LinearLayout body = column();
     scroll.addView(body);
     content.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-    LinearLayout modules = row();
-    modules.setPadding(dp(4), dp(4), dp(4), dp(4));
-    modules.setBackground(surface(paper, 12, true));
-    weighted(modules, module("server", "servers", "choose server", this::profiles));
-    weighted(
-        modules,
-        module(
-            "dashboard",
+    LinearLayout actions = row();
+    actions.addView(iconButton("server", "server manager", this::menu));
+    actions.addView(
+        iconButton(
             "dashboard",
             "open dashboard",
             () -> {
-              if (c.profile() == null) loginDialog();
-              else openLink(c.profile().optString("url"));
+              if (c.profile() != null) openLink(c.profile().optString("url"));
             }));
-    boolean dark = theme.equals("dark");
-    weighted(
-        modules,
-        module(
-            dark ? "sun" : "moon",
-            dark ? "light" : "dark",
-            "toggle light or dark",
-            () -> c.theme(dark ? "light" : "dark")));
-    weighted(modules, module("about", "about", "about lcb-hermes", this::about));
-    add(body, modules);
-    gap(body, 12);
+    actions.addView(iconButton("about", "about lcb-hermes", this::about));
+    add(body, actions);
+    gap(body, 8);
     LinearLayout card = column();
     card.setPadding(dp(8), dp(10), dp(8), dp(10));
     card.setBackground(surface(paper, 12, true));
@@ -1498,7 +2002,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
   }
 
   private void refreshServerStats() {
-    if (!started || !page.equals("server") || statsRows == null) return;
+    if (!started || statsRows == null) return;
     Gateway source = c.gateway;
     if (source == null || !source.online()) {
       statsNotice.setText("Connect to read server stats.");
@@ -1512,16 +2016,33 @@ public final class MainActivity extends Activity implements Controller.Observer 
         "/api/system/stats",
         null,
         (v, e) -> {
-          if (!started
-              || !page.equals("server")
-              || generation != statsGeneration
-              || source != c.gateway) return;
+          if (!started || statsRows == null || generation != statsGeneration || source != c.gateway)
+            return;
           statsLoading = false;
           if (e != null) {
             statsNotice.setText("Stats unavailable. " + e);
             return;
           }
           statsRows.removeAllViews();
+          add(statsRows, paneHeading("Hermes " + v.optString("hermes_version")));
+          metricBar(statsRows, "CPU", v.optDouble("cpu_percent", Double.NaN));
+          JSONObject memory = v.optJSONObject("memory"), disk = v.optJSONObject("disk");
+          metricBar(
+              statsRows,
+              "Memory",
+              memory == null ? Double.NaN : memory.optDouble("percent", Double.NaN));
+          metricBar(
+              statsRows, "Disk", disk == null ? Double.NaN : disk.optDouble("percent", Double.NaN));
+          add(statsRows, label("Server default model\n" + c.defaultModel));
+          if (!page.equals("server")) {
+            JSONObject process = v.optJSONObject("process");
+            if (process != null && process.has("rss"))
+              add(
+                  statsRows,
+                  label("Hermes process · " + ServerStats.size(process.optDouble("rss"))));
+            statsNotice.setText("Live · server host");
+            return;
+          }
           Map<String, LinkedHashMap<String, String>> sections =
               ServerStats.sections(v, System.currentTimeMillis() / 1000);
           for (Map.Entry<String, LinkedHashMap<String, String>> section : sections.entrySet()) {
@@ -1549,6 +2070,24 @@ public final class MainActivity extends Activity implements Controller.Observer 
                   ? "Stats unavailable on this server."
                   : "live · refreshes every 5 seconds");
         });
+  }
+
+  private void metricBar(LinearLayout parent, String name, double percent) {
+    if (Double.isNaN(percent)) return;
+    TextView heading = text(name + "  ·  " + ServerStats.percent(percent), 13, ink);
+    Glyph icon = new Glyph(name.equals("Disk") ? "folder" : "resource", ink);
+    icon.setBounds(0, 0, dp(14), dp(14));
+    heading.setCompoundDrawables(icon, null, null, null);
+    heading.setCompoundDrawablePadding(dp(6));
+    add(parent, heading);
+    ProgressBar bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+    bar.setMax(1000);
+    bar.setProgress((int) Math.max(0, Math.min(1000, percent * 10)));
+    bar.setProgressTintList(android.content.res.ColorStateList.valueOf(accent));
+    bar.setProgressBackgroundTintList(android.content.res.ColorStateList.valueOf(face));
+    bar.setContentDescription(name + " usage " + ServerStats.percent(percent));
+    parent.addView(bar, new LinearLayout.LayoutParams(-1, dp(8)));
+    gap(parent, 8);
   }
 
   private String pretty(JSONObject value) {
@@ -1599,8 +2138,14 @@ public final class MainActivity extends Activity implements Controller.Observer 
         for (int i = 0; i < choices.length(); i++) once |= choices.optString(i).equals("once");
       if (once) b.setPositiveButton("allow once", (d, w) -> c.answer(r, obj("choice", "once")));
       Sheet dialog = b.create();
+      requestDialog = dialog;
+      requestDialogId = r.optString("id");
       dialog.setOnCancelListener(d -> c.answer(r, obj("choice", "deny")));
-      dialog.setOnDismissListener(d -> dialogOpen = false);
+      dialog.setOnDismissListener(
+          d -> {
+            dialogOpen = false;
+            if (requestDialog == dialog) requestDialog = null;
+          });
       dialog.show();
     } else if (method.equals("clarify")) {
       JSONArray qs = p.optJSONArray("questions");
@@ -1613,6 +2158,7 @@ public final class MainActivity extends Activity implements Controller.Observer 
   }
 
   private void clarify(JSONObject request, JSONArray questions, int index, JSONObject answers) {
+    if (!c.requests.containsKey(request.optString("id"))) return;
     if (index >= questions.length()) {
       c.answer(
           request,
@@ -1676,8 +2222,14 @@ public final class MainActivity extends Activity implements Controller.Observer 
                   mainClarify(request, questions, index, answers);
                 })
             .create();
+    requestDialog = dialog;
+    requestDialogId = request.optString("id");
     dialog.setOnCancelListener(d -> c.answer(request, obj("answer", "")));
-    dialog.setOnDismissListener(d -> dialogOpen = false);
+    dialog.setOnDismissListener(
+        d -> {
+          dialogOpen = false;
+          if (requestDialog == dialog) requestDialog = null;
+        });
     dialog.show();
   }
 

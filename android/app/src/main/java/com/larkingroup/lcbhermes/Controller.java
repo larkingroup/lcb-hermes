@@ -37,6 +37,146 @@ final class Controller implements Gateway.Listener {
       draft = "",
       status = "offline";
   String newModel = "", newProvider = "", notice = "";
+  String reasoning = "", newReasoning = "", cwd = "", newCwd = "", defaultModel = "";
+  JSONArray projects = new JSONArray();
+  final LinkedHashMap<String, String> folders = new LinkedHashMap<>();
+  final Map<String, String> chatFolders = new HashMap<>();
+  final Map<String, String> aliases = new HashMap<>();
+
+  String identity(String id) {
+    return aliases.getOrDefault(id, id);
+  }
+
+  boolean sameChat(String id) {
+    return identity(id).equals(identity(storedId));
+  }
+
+  final List<String> activity = new ArrayList<>();
+
+  void activity(String value) {
+    if (value == null || value.isBlank()) return;
+    if (activity.isEmpty() || !activity.get(activity.size() - 1).equals(value)) activity.add(value);
+    while (activity.size() > 60) activity.remove(0);
+  }
+
+  void completed(String id) {
+    JSONObject p = profile();
+    if (p == null || id.isEmpty()) return;
+    try {
+      JSONObject order = p.optJSONObject("completed_order");
+      if (order == null) {
+        order = obj();
+        p.put("completed_order", order);
+      }
+      order.put(id, System.currentTimeMillis());
+    } catch (JSONException ignored) {
+    }
+  }
+
+  void refreshWorkspaces() {
+    Gateway source = gateway;
+    if (source == null || !source.online()) return;
+    source.rpc(
+        "projects.list",
+        obj(),
+        (v, e) -> {
+          if (source != gateway || e != null) return;
+          projects = v.optJSONArray("projects");
+          if (projects == null) projects = new JSONArray();
+          folders.clear();
+          chatFolders.clear();
+          Workbench.tree(projects, "", "", chatFolders, folders);
+          source.rpc(
+              "projects.tree",
+              obj("preview_limit", 500, "session_limit", 500),
+              (tree, error) -> {
+                if (source != gateway) return;
+                if (error == null) Workbench.tree(tree, "", "", chatFolders, folders);
+                changed(false);
+              });
+          changed(false);
+        });
+  }
+
+  void chooseFolder(String path) {
+    newCwd = path;
+    JSONObject p = profile();
+    if (p != null)
+      try {
+        JSONObject settings = p.optJSONObject("chat_settings");
+        if (settings == null) {
+          settings = obj();
+          p.put("chat_settings", settings);
+        }
+        JSONObject fresh = settings.optJSONObject("@new");
+        if (fresh == null) fresh = obj();
+        fresh.put("cwd", path);
+        settings.put("@new", fresh);
+      } catch (JSONException ignored) {
+      }
+    if (storedId.isEmpty()) cwd = path;
+    save();
+    changed(false);
+  }
+
+  void chooseModel(
+      String selected, String slug, String effort, boolean confirmed, Gateway.Result cb) {
+    if (submissionPending || status.equals("loading chat")) {
+      cb.done(null, "Wait for this chat to load or send.");
+      return;
+    }
+    if (storedId.isEmpty()) {
+      model = newModel = selected;
+      provider = newProvider = selected.isEmpty() ? "" : slug;
+      reasoning = newReasoning = effort;
+      save();
+      changed(false);
+      cb.done(obj(), null);
+      return;
+    }
+    Gateway source = gateway;
+    String chat = storedId;
+    int generation = sessionGeneration;
+    if (source == null || !source.online() || sessionId.isEmpty()) {
+      cb.done(null, "Reconnect and open this chat first.");
+      return;
+    }
+    String value;
+    try {
+      value = Workbench.modelValue(selected, slug, effort);
+    } catch (IllegalArgumentException e) {
+      cb.done(null, e.getMessage());
+      return;
+    }
+    JSONObject params = obj("session_id", sessionId, "key", "model", "value", value);
+    if (confirmed)
+      try {
+        params.put("confirm_expensive_model", true);
+      } catch (JSONException ignored) {
+      }
+    source.rpc(
+        "config.set",
+        params,
+        (v, e) -> {
+          if (source != gateway || generation != sessionGeneration || !chat.equals(storedId)) {
+            cb.done(null, "Chat changed. Open its model picker again.");
+            return;
+          }
+          if (e == null && !v.optBoolean("confirm_required")) {
+            model = v.optString("value", selected);
+            provider = slug;
+            if (!effort.isEmpty()) reasoning = effort;
+            notice =
+                v.optBoolean("deferred")
+                    ? "Settings selected for the next turn."
+                    : "Chat model settings updated.";
+            save();
+            changed(false);
+          }
+          cb.done(v, e);
+        });
+  }
+
   boolean running, connecting, loaded, demo, submissionPending;
   private JSONObject stream;
   private int reconnects;
@@ -73,11 +213,12 @@ final class Controller implements Gateway.Listener {
   private WatchedChat watchedChat(String id) {
     if (id.isEmpty()) return null;
     for (WatchedChat chat : watched.values())
-      if (id.equals(chat.runtime) || id.equals(chat.stored)) return chat;
+      if (id.equals(chat.runtime) || identity(id).equals(identity(chat.stored))) return chat;
     return null;
   }
 
   String chatBadge(String id) {
+    id = identity(id);
     if (id.equals(storedId) && running) return "working";
     if (id.equals(storedId) && !requests.isEmpty()) return "answer needed";
     WatchedChat chat = watchedChat(id);
@@ -85,31 +226,44 @@ final class Controller implements Gateway.Listener {
     if (chat != null && chat.running) return "working";
     JSONObject p = profile();
     JSONObject unread = p == null ? null : p.optJSONObject("unread");
-    return unread != null && unread.optBoolean(id) ? "reply" : "";
+    return !id.equals(storedId) && unread != null && unread.optBoolean(id) ? "reply" : "";
   }
 
   JSONArray sidebarSessions() {
     JSONArray all = new JSONArray();
     Set<String> seen = new HashSet<>();
-    if (sessions != null)
-      for (int i = 0; i < sessions.length(); i++) {
-        JSONObject session = sessions.optJSONObject(i);
-        if (session == null || !seen.add(session.optString("id"))) continue;
-        WatchedChat chat = watchedChat(session.optString("id"));
-        all.put(
-            chat == null
-                ? session
-                : obj(
-                    "id",
-                    chat.stored,
-                    "title",
-                    chat.title,
-                    "preview",
-                    session.optString("preview")));
+    JSONArray catalog = Workbench.catalog(sessions, profile());
+    for (int i = 0; i < catalog.length(); i++) {
+      JSONObject row = catalog.optJSONObject(i);
+      if (row == null) continue;
+      JSONObject copy;
+      try {
+        copy = new JSONObject(row.toString());
+      } catch (JSONException e) {
+        continue;
       }
+      String id = row.optString("id");
+      seen.add(id);
+      WatchedChat chat = watchedChat(id);
+      try {
+        if (chat != null) copy.put("title", chat.title);
+        if (id.equals(storedId)) copy.put("title", title);
+        copy.put("cwd", chatFolders.getOrDefault(id, row.optString("cwd")));
+      } catch (JSONException ignored) {
+      }
+      all.put(copy);
+    }
     for (WatchedChat chat : watched.values())
-      if (seen.add(chat.stored)) all.put(obj("id", chat.stored, "title", chat.title));
-    return all;
+      if (seen.add(chat.stored))
+        all.put(
+            obj(
+                "id",
+                chat.stored,
+                "title",
+                chat.title,
+                "cwd",
+                chatFolders.getOrDefault(chat.stored, "")));
+    return Workbench.catalog(all, profile());
   }
 
   void removedChat(String id) {
@@ -164,6 +318,20 @@ final class Controller implements Gateway.Listener {
   private void restoreDraft(String id) {
     JSONObject value = ChatDrafts.read(profile(), id);
     draft = value.optString("text");
+    JSONObject settings = profile() == null ? null : profile().optJSONObject("chat_settings");
+    settings = settings == null ? null : settings.optJSONObject(id.isEmpty() ? "@new" : id);
+    model = settings == null ? "" : settings.optString("model");
+    provider = settings == null ? "" : settings.optString("provider");
+    reasoning = settings == null ? "" : settings.optString("reasoning");
+    cwd =
+        settings == null
+            ? (id.isEmpty() ? newCwd : "")
+            : settings.optString("cwd", id.isEmpty() ? newCwd : "");
+    if (id.isEmpty()) {
+      newModel = model;
+      newProvider = provider;
+      newReasoning = reasoning;
+    }
     attachments = value.optJSONArray("attachments");
     if (attachments == null) attachments = new JSONArray();
   }
@@ -186,6 +354,10 @@ final class Controller implements Gateway.Listener {
           main.post(
               () -> {
                 data = ready;
+                try {
+                  data.put("theme", "light");
+                } catch (JSONException ignored) {
+                }
                 notice = message;
                 loaded = true;
                 profileId = data.optString("active");
@@ -253,6 +425,8 @@ final class Controller implements Gateway.Listener {
     JSONObject p = profile();
     watched.clear();
     if (p == null) return;
+    newCwd = p.optString("new_cwd");
+    defaultModel = p.optString("default_model");
     JSONArray background = p.optJSONArray("watched_chats");
     if (background != null)
       for (int i = 0; i < background.length(); i++) {
@@ -280,6 +454,15 @@ final class Controller implements Gateway.Listener {
     if (p != null) {
       ChatDrafts.write(p, storedId, draft, attachments);
       try {
+        JSONObject settings = p.optJSONObject("chat_settings");
+        if (settings == null) {
+          settings = obj();
+          p.put("chat_settings", settings);
+        }
+        settings.put(
+            storedId.isEmpty() ? "@new" : storedId,
+            obj("model", model, "provider", provider, "reasoning", reasoning, "cwd", cwd));
+        p.put("new_cwd", newCwd).put("default_model", defaultModel);
         p.put("session", storedId)
             .put("draft", draft)
             .put("title", title)
@@ -344,6 +527,15 @@ final class Controller implements Gateway.Listener {
     for (int i = 0; i < attachments.length(); i++) {
       JSONObject a = attachments.optJSONObject(i);
       if (a != null && !a.optString("id").equals(id)) keep.put(a);
+      else if (a != null
+          && gateway != null
+          && gateway.online()
+          && !sessionId.isEmpty()
+          && a.optString("mime").startsWith("image/"))
+        gateway.rpc(
+            "image.detach",
+            obj("session_id", sessionId, "path", a.optString("path")),
+            (v, e) -> {});
     }
     attachments = keep;
     save();
@@ -438,7 +630,11 @@ final class Controller implements Gateway.Listener {
               .put("message_attachments", old.optJSONObject("message_attachments"))
               .put("chat_drafts", old.optJSONObject("chat_drafts"))
               .put("unread", old.optJSONObject("unread"))
-              .put("watched_chats", old.optJSONArray("watched_chats"));
+              .put("watched_chats", old.optJSONArray("watched_chats"))
+              .put("chat_settings", old.optJSONObject("chat_settings"))
+              .put("completed_order", old.optJSONObject("completed_order"))
+              .put("retained_drafts", old.optJSONArray("retained_drafts"))
+              .put("new_cwd", old.optString("new_cwd"));
         } catch (Exception ignored) {
         }
         break;
@@ -515,7 +711,9 @@ final class Controller implements Gateway.Listener {
       if (p != null && !p.optString("id").equals(profileId)) a.put(p);
     }
     try {
-      data.put("profiles", a).put("active", "");
+      JSONObject old = profile();
+      if (old != null) old.put("hidden", true).remove("cookies");
+      data.put("active", "");
     } catch (Exception ignored) {
     }
     profileId = "";
@@ -540,9 +738,17 @@ final class Controller implements Gateway.Listener {
     uploadsPending = 0;
     watched.clear();
     sessions = new JSONArray();
+    projects = new JSONArray();
+    folders.clear();
+    chatFolders.clear();
+    aliases.clear();
+    defaultModel = "";
+    cwd = "";
+    newCwd = "";
+    activity.clear();
     listPending = false;
     status = "offline";
-    context.stopService(new Intent(context, TurnService.class));
+    TurnService.sync(context);
     reconnectScheduled = false;
   }
 
@@ -595,7 +801,18 @@ final class Controller implements Gateway.Listener {
     if (!storedId.isEmpty()) resume(storedId);
     else changed(false);
     list((v, e) -> {});
+    refreshWorkspaces();
     Gateway source = gateway;
+    source.rpc(
+        "config.get",
+        obj("key", "provider"),
+        (v, e) -> {
+          if (source == gateway && e == null) {
+            defaultModel = v.optString("model");
+            save();
+            changed(false);
+          }
+        });
     for (WatchedChat chat : new ArrayList<>(watched.values())) {
       if (!chat.running || chat.stored.equals(storedId)) continue;
       source.rpc(
@@ -630,6 +847,7 @@ final class Controller implements Gateway.Listener {
                     }
                   }
                 markRead(chat.stored, true);
+                completed(chat.stored);
                 TurnService.reply(context, reply, "", profileId, chat.stored);
                 save();
               }
@@ -670,6 +888,7 @@ final class Controller implements Gateway.Listener {
     if (storedId.isEmpty() && !demo) return;
     leaveChat();
     sessionGeneration++;
+    activity.clear();
     if (gateway != null && gateway.online()) status = "connected";
     rows.clear();
     tools.clear();
@@ -729,13 +948,16 @@ final class Controller implements Gateway.Listener {
   private String storedKey(JSONObject result) {
     JSONObject info = result.optJSONObject("info");
     String id = info == null ? "" : info.optString("stored_session_id");
-    if (id.isEmpty()) id = result.optString("stored_session_id", result.optString("session_id"));
-    return id;
+    if (id.isEmpty()) id = Workbench.canonical(result);
+    return identity(id);
   }
 
   private void loadSession(JSONObject v) {
     String previousId = storedId;
+    String previousRuntime = sessionId;
     sessionId = v.optString("session_id");
+    if (!previousRuntime.equals(sessionId)) sequences.remove(sessionId + ":" + epoch);
+    activity.clear();
     storedId = storedKey(v);
     rows.clear();
     tools.clear();
@@ -747,8 +969,21 @@ final class Controller implements Gateway.Listener {
         JSONObject row = a.optJSONObject(i);
         if (row != null) rows.add(row);
       }
-    updateInfo(v.optJSONObject("info"));
     if (!previousId.equals(storedId)) restoreDraft(storedId);
+    updateInfo(v.optJSONObject("info"));
+    Gateway source = gateway;
+    String current = sessionId;
+    if (source != null)
+      source.rpc(
+          "config.get",
+          obj("session_id", current, "key", "reasoning"),
+          (r, e) -> {
+            if (source == gateway && current.equals(sessionId) && e == null) {
+              reasoning = r.optString("value");
+              save();
+              changed(false);
+            }
+          });
     WatchedChat watchedChat = watched.remove(storedId);
     markRead(storedId, false);
     restoreMessageAttachments();
@@ -794,9 +1029,22 @@ final class Controller implements Gateway.Listener {
     }
     submissionPending = true;
     changed(false);
+    if (sessionId.isEmpty() && !storedId.isEmpty()) {
+      submissionPending = false;
+      notice = "Open this saved chat before sending. Your draft is saved.";
+      resume(storedId);
+      return;
+    }
     if (sessionId.isEmpty()) {
       int generation = ++sessionGeneration;
       JSONObject params = obj("source", "android", "close_on_disconnect", false);
+      try {
+        if (!cwd.isEmpty()) params.put("cwd", cwd);
+        if (!newReasoning.isEmpty()) params.put("reasoning_effort", newReasoning);
+      } catch (JSONException ignored) {
+      }
+      String requestedCwd = cwd;
+      Gateway creatingSource = gateway;
       if (!newModel.isEmpty())
         try {
           params.put("model", newModel).put("provider", newProvider);
@@ -806,7 +1054,7 @@ final class Controller implements Gateway.Listener {
           "session.create",
           params,
           (v, e) -> {
-            if (generation != sessionGeneration) return;
+            if (generation != sessionGeneration || creatingSource != gateway) return;
             if (e != null) {
               submissionPending = false;
               notice = e;
@@ -817,6 +1065,14 @@ final class Controller implements Gateway.Listener {
             ChatDrafts.move(profile(), "", createdId);
             loadSession(v);
             save();
+            if (!requestedCwd.isEmpty() && !requestedCwd.equals(cwd)) {
+              submissionPending = false;
+              notice =
+                  "Hermes opened a different folder. Your message and attachments are saved; review"
+                      + " the workspace before sending.";
+              changed(true);
+              return;
+            }
             attachAndSend(text, 0, new ArrayList<>());
           });
     } else attachAndSend(text, 0, new ArrayList<>());
@@ -841,21 +1097,35 @@ final class Controller implements Gateway.Listener {
     Gateway source = gateway;
     int generation = sessionGeneration;
     source.rpc(
-        "image.attach",
+        "image.detach",
         obj("session_id", sessionId, "path", a.optString("path")),
-        (v, e) -> {
+        (detached, detachError) -> {
           if (source != gateway || generation != sessionGeneration) return;
-          if (e != null) {
-            for (String path : queued)
-              source.rpc(
-                  "image.detach", obj("session_id", sessionId, "path", path), (r, error) -> {});
+          if (detachError != null) {
             submissionPending = false;
-            notice = "Could not attach the image. " + e;
+            notice = "Could not reconcile the image queue. " + detachError;
             changed(false);
             return;
           }
-          queued.add(v.optString("path", a.optString("path")));
-          attachAndSend(text, index + 1, queued);
+          source.rpc(
+              "image.attach",
+              obj("session_id", sessionId, "path", a.optString("path")),
+              (v, e) -> {
+                if (source != gateway || generation != sessionGeneration) return;
+                if (e != null) {
+                  for (String path : queued)
+                    source.rpc(
+                        "image.detach",
+                        obj("session_id", sessionId, "path", path),
+                        (r, error) -> {});
+                  submissionPending = false;
+                  notice = "Could not attach the image. " + e;
+                  changed(false);
+                  return;
+                }
+                queued.add(v.optString("path", a.optString("path")));
+                attachAndSend(text, index + 1, queued);
+              });
         });
   }
 
@@ -870,7 +1140,8 @@ final class Controller implements Gateway.Listener {
     for (JSONObject row : rows)
       if (row.optString("role").equals("user")) {
         JSONObject meta = chat.optJSONObject(String.valueOf(ordinal++));
-        if (meta != null)
+        if (meta != null
+            && (!meta.has("wire_text") || meta.optString("wire_text").equals(Protocol.text(row))))
           try {
             row.put("attachments", meta.optJSONArray("attachments"))
                 .put("display_text", meta.optString("display_text"));
@@ -905,11 +1176,14 @@ final class Controller implements Gateway.Listener {
           chat = obj();
           all.put(storedId, chat);
         }
-        chat.put(String.valueOf(ordinal), obj("display_text", display, "attachments", sent));
+        chat.put(
+            String.valueOf(ordinal),
+            obj("display_text", display, "wire_text", wire, "attachments", sent));
       } catch (Exception ignored) {
       }
-    attachments = new JSONArray();
     tools.clear();
+    activity.clear();
+    activity("Working");
     stream = null;
     rows.add(user);
     running = true;
@@ -917,10 +1191,13 @@ final class Controller implements Gateway.Listener {
     taskService();
     changed(true);
     save();
-    gateway.rpc(
+    Gateway source = gateway;
+    int generation = sessionGeneration;
+    source.rpc(
         "prompt.submit",
         obj("session_id", sessionId, "text", wire, "surface", "android"),
         (v, e) -> {
+          if (source != gateway || generation != sessionGeneration) return;
           submissionPending = false;
           if (e != null) {
             // An ambiguous disconnect may already have sent the turn; never requeue images blindly.
@@ -931,6 +1208,7 @@ final class Controller implements Gateway.Listener {
             }
           } else {
             draft = "";
+            attachments = new JSONArray();
             save();
           }
           changed(false);
@@ -958,13 +1236,61 @@ final class Controller implements Gateway.Listener {
       return;
     }
     Gateway source = gateway;
+    long requestedAt = System.currentTimeMillis();
     gateway.rpc(
         "session.list",
-        obj("limit", 100),
+        obj("limit", 500),
         (v, e) -> {
           if (source != gateway) return;
           if (e == null) {
-            sessions = v.optJSONArray("sessions");
+            JSONArray listed = v.optJSONArray("sessions");
+            if (listed != null)
+              for (int i = 0; i < listed.length(); i++) {
+                JSONObject row = listed.optJSONObject(i);
+                if (row != null && !row.optString("resolved_id").isEmpty()) {
+                  String tip = row.optString("resolved_id"), root = row.optString("id");
+                  aliases.put(tip, root);
+                  ChatDrafts.move(profile(), tip, root);
+                  if (tip.equals(storedId)) storedId = root;
+                  WatchedChat moved = watched.remove(tip);
+                  if (moved != null) {
+                    moved.stored = root;
+                    WatchedChat existing = watched.get(root);
+                    if (existing == null) watched.put(root, moved);
+                    else {
+                      existing.running |= moved.running;
+                      existing.requests.putAll(moved.requests);
+                    }
+                  }
+                  JSONObject profile = profile();
+                  if (profile != null)
+                    for (String field :
+                        new String[] {"unread", "completed_order", "message_attachments"}) {
+                      JSONObject values = profile.optJSONObject(field);
+                      if (values != null && values.has(tip)) {
+                        try {
+                          if (!values.has(root)) values.put(root, values.opt(tip));
+                        } catch (JSONException ignored) {
+                        }
+                        values.remove(tip);
+                      }
+                    }
+                }
+              }
+            // A subsequent list is authoritative recent-first; overlay only newer completion
+            // events.
+            JSONObject order =
+                profile() == null ? null : profile().optJSONObject("completed_order");
+            if (order != null) {
+              List<String> settled = new ArrayList<>();
+              Iterator<String> keys = order.keys();
+              while (keys.hasNext()) {
+                String key = keys.next();
+                if (order.optLong(key) <= requestedAt) settled.add(key);
+              }
+              for (String key : settled) order.remove(key);
+            }
+            sessions = Workbench.catalog(listed, profile());
             changed(false);
           }
           cb.done(v, e);
@@ -976,7 +1302,11 @@ final class Controller implements Gateway.Listener {
     model = info.optString("model", model);
     provider = info.optString("provider", provider);
     title = info.optString("title", title);
-    storedId = info.optString("stored_session_id", storedId);
+    String canonical = identity(info.optString("stored_session_id", storedId));
+    if (!canonical.equals(storedId)) ChatDrafts.move(profile(), storedId, canonical);
+    storedId = canonical;
+    cwd = info.optString("cwd");
+    if (!storedId.isEmpty() && !cwd.isEmpty()) chatFolders.put(storedId, cwd);
   }
 
   @Override
@@ -994,7 +1324,7 @@ final class Controller implements Gateway.Listener {
     }
     String id = event.optString("session_id");
     WatchedChat background = watchedChat(id);
-    boolean active = !id.isEmpty() && (id.equals(sessionId) || id.equals(storedId));
+    boolean active = !id.isEmpty() && (id.equals(sessionId) || sameChat(id));
     if (!type.equals("sessions.changed") && !active && background == null) return;
     if (event.has("seq")) {
       long seq = event.optLong("seq");
@@ -1008,6 +1338,8 @@ final class Controller implements Gateway.Listener {
     }
     switch (type) {
       case "message.start":
+        activity.clear();
+        activity("Working");
         running = true;
         stream = null;
         taskService();
@@ -1038,7 +1370,8 @@ final class Controller implements Gateway.Listener {
           } catch (Exception ignored) {
           }
         running = false;
-        submissionPending = false;
+        activity(p.optString("status").equals("interrupted") ? "Stopped" : "Complete");
+        completed(storedId);
         status = gateway != null && gateway.online() ? "connected" : "offline";
         stream = null;
         notice = p.optString("error", p.optString("warning", ""));
@@ -1058,11 +1391,31 @@ final class Controller implements Gateway.Listener {
         changed(true);
         break;
       case "message.interim":
+        if (!p.optBoolean("already_streamed") && !p.optString("text").isEmpty())
+          rows.add(obj("role", "assistant", "text", p.optString("text")));
         if (stream != null) stream = null;
         changed(true);
         break;
+      case "thinking.delta":
+      case "reasoning.delta":
+      case "reasoning.available":
+        if (running) {
+          activity("Thinking");
+          renderSoon();
+        }
+        break;
+      case "tool.generating":
+        if (running) {
+          activity("Preparing " + p.optString("name", "tool"));
+          renderSoon();
+        }
+        break;
       case "tool.start":
       case "tool.complete":
+        activity(
+            (type.equals("tool.complete") ? "Finished " : "Using ")
+                + p.optString("name", "tool")
+                + (p.optString("summary").isEmpty() ? "" : ": " + p.optString("summary")));
         JSONObject tool = tools.get(p.optString("tool_id"));
         if (tool == null) tool = obj();
         try {
@@ -1088,6 +1441,7 @@ final class Controller implements Gateway.Listener {
         break;
       case "status.update":
         status = p.optString("text", "working");
+        if (running) activity(status);
         renderSoon();
         break;
       case "session.usage":
@@ -1113,11 +1467,18 @@ final class Controller implements Gateway.Listener {
         notice = "Session moved on the server. Reconnect to resume.";
         changed(false);
         break;
+      case "request.cancel":
+        requests.remove(p.optString("id"));
+        changed(false);
+        break;
     }
   }
 
   private void backgroundEvent(WatchedChat chat, String type, JSONObject payload) {
     switch (type) {
+      case "request.cancel":
+        chat.requests.remove(payload.optString("id"));
+        break;
       case "message.start":
         chat.running = true;
         chat.reply = "";
@@ -1131,6 +1492,7 @@ final class Controller implements Gateway.Listener {
         chat.requests.clear();
         if (notify) {
           markRead(chat.stored, true);
+          completed(chat.stored);
           TurnService.reply(
               context,
               payload.optString("text", chat.reply),
@@ -1157,7 +1519,7 @@ final class Controller implements Gateway.Listener {
   public void request(JSONObject r) {
     JSONObject params = r.optJSONObject("params");
     String id = params == null ? "" : params.optString("session_id");
-    if (!id.isEmpty() && !id.equals(sessionId) && !id.equals(storedId)) {
+    if (!id.isEmpty() && !id.equals(sessionId) && !sameChat(id)) {
       WatchedChat chat = watchedChat(id);
       if (chat != null
           && (r.optString("method").equals("approval")
@@ -1178,6 +1540,7 @@ final class Controller implements Gateway.Listener {
   }
 
   void answer(JSONObject r, JSONObject value) {
+    if (!requests.containsKey(r.optString("id"))) return;
     if (gateway == null || !gateway.online()) {
       notice = "Reconnect before answering.";
       changed(false);
@@ -1200,7 +1563,7 @@ final class Controller implements Gateway.Listener {
 
   void theme(String theme) {
     try {
-      data.put("theme", theme);
+      data.put("theme", "light");
     } catch (Exception ignored) {
     }
     save();
@@ -1208,12 +1571,7 @@ final class Controller implements Gateway.Listener {
   }
 
   void taskService() {
-    try {
-      Intent i = new Intent(context, TurnService.class);
-      if (anyRunning()) context.startForegroundService(i);
-      else context.stopService(i);
-    } catch (Exception ignored) {
-    }
+    TurnService.sync(context);
   }
 
   void demo() {
