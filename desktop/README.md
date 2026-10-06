@@ -10,9 +10,13 @@ such as `https://server:port`, and login. Check private HTTP if your server uses
 The computer button switches saved servers. Use Server > Server manager to add or
 remove a server. Each server/login keeps its own drafts and workspace selection.
 
-Classic beige interface, separate drafts, images, model selection, requests and export.
+Classic beige interface, separate drafts, model selection and Hermes requests.
+Images and files sit in a removable attachment tray above the message box.
+Sent files leave a compact filename in the transcript. Export is under Chat > Export chat.
 Drag the dotted divider to resize the chat list, or use View > Wider/Narrower chat list.
-Folders keep their state during replies. The right pane shows resource bars and a
+Chats show their saved creation time and source. Completed background replies move
+to the top of their folder and turn blue until opened. Folders keep their state during replies.
+The right pane shows resource bars and a
 wrapped activity log from Hermes events.
 Ctrl+Enter sends; Ctrl+N starts a chat; Ctrl+R reconnects.
 

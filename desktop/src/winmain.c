@@ -23,31 +23,32 @@
 #include "markdown.h"
 
 enum { IdTree=100,IdPrompt,IdSend,IdNew,IdServer,IdModel,IdSearch,IdAttach,IdRequest,IdExport,IdReconnect,IdRefresh,IdRename,IdDelete,IdForget,IdAbout,IdDraft,IdRemoveAttachment,IdWorkspace,IdProjects,IdMonitor,IdExpand,IdCollapse,IdExit,IdWider,IdNarrower,IdManageServers,IdAddServer,IdRender=300,IdSave,IdHeartbeat,IdTimeout,IdStats,IdList };
-enum { RpcCaps=1,RpcList,RpcResume,RpcCreate,RpcSubmit,RpcStop,RpcModels,RpcAttach,RpcRename,RpcDelete,RpcPing,RpcCloseDelete,RpcResumeSend,RpcProjects,RpcProjectCreate,RpcProjectAdd,RpcDefaultModel,RpcProjectTree,RpcSetModel,RpcReasoning };
+enum { RpcCaps=1,RpcList,RpcResume,RpcCreate,RpcSubmit,RpcStop,RpcModels,RpcAttach,RpcRename,RpcDelete,RpcPing,RpcCloseDelete,RpcResumeSend,RpcProjects,RpcProjectCreate,RpcProjectAdd,RpcDefaultModel,RpcProjectTree,RpcSetModel,RpcReasoning,RpcDetach,RpcImageReset };
 enum { RestStats=1,RestUpload };
-typedef struct Pending { int id, kind; Chat *chat; char value[500],reasoning[32],provider[160]; int confirmed; ULONGLONG started; struct Pending *next; } Pending;
+typedef struct Pending { int id, kind; Chat *chat; char value[500],reasoning[32],provider[160],path[1024]; int confirmed; ULONGLONG started; struct Pending *next; } Pending;
 typedef struct Preview { HBITMAP bitmap; LONG anchor; int width,height; } Preview;
-typedef struct Upload { Chat *chat; wchar_t path[32768]; } Upload;
+typedef struct Upload { Chat *chat; wchar_t path[32768]; struct Upload *next; } Upload;
 typedef struct TreeRow { Chat *chat; HTREEITEM item,parent; } TreeRow;
 typedef struct TreeGroup { char path[1024]; HTREEITEM item; } TreeGroup;
 typedef struct RenderRow { unsigned long long hash; LONG anchor; int visible; } RenderRow;
 static struct {
     HINSTANCE instance; HWND window,tree,search,prompt,transcript,send,fresh,server,model,title,status,attach,request,serverwin,tooltip;
-    HWND explorerhead,monitorhead,monitor,activityhead,activitytitle,activityview,workspace,workspacelabel,projectbutton,summary,projectwin,progress,aboutwin,hotbutton,modelwin;
+    HWND explorerhead,monitorhead,monitor,activityhead,activitytitle,activityview,workspace,workspacelabel,projectbutton,summary,projectwin,progress,aboutwin,hotbutton,modelwin,tray;
     HDWP positions;
-    HFONT normal,fixed,heading,brandfont; HBRUSH face,paper; HIMAGELIST icons; HMODULE rich;
+    HFONT normal,fixed,heading,brandfont,small; HBRUSH face,paper; HIMAGELIST icons; HMODULE rich;
     HBITMAP nouslogo; int logo_width,logo_height;
     int dpi,width,height,connected,connecting,restoring,nextid,treebusy,models_pending,models_open,uploads,corrupt;
-    int sidebar_width,split_x,dragging,show_monitor,monitor_visible,monitor_x,stats_pending,projects_supported;
+    int sidebar_width,split_x,dragging,show_monitor,monitor_visible,monitor_x,stats_pending,projects_supported,message_y;
     int list_pending,list_again,render_pending,project_pending;
+    unsigned long long order_clock;
     Chat *model_chat; int model_dirty;
     COLORREF ink,muted,bg,fg,accent; wchar_t path[1024]; char url[1024],user[256],cookie[8192],notice[512],version[80],newmodel[160],newprovider[160],epoch[160];
     char default_model[160],newcwd[1024]; ULONGLONG stats_at,turn_at;
-    Net *net; cJSON *settings,*profile,*stats,*models,*projects,*project_tree; Pending *pending; Chat **chats,*current; size_t count,capacity;
+    Net *net; cJSON *settings,*profile,*stats,*models,*projects,*project_tree; Pending *pending; Upload *upload_jobs; Chat **chats,*current; size_t count,capacity;
     TreeRow rows[1000]; size_t nrows; TreeGroup groups[1000]; size_t ngroups;
-    Preview previews[128]; int npreviews; char *status_text;
+    Preview previews[128]; int npreviews,tray_height,tray_offset,tray_selected; Chat *tray_chat; unsigned long long tray_hash; char *status_text;
     Chat *view_chat,*activity_chat; RenderRow *view_rows; size_t view_count,view_capacity; LONG view_tail;
-    unsigned long long view_attachments; int view_valid,paragraph_start,speaker;
+    int view_valid,paragraph_start,speaker;
     char *activity_text;
 } app;
 static void render(void), sidebar(void), save(void), controls(void), show_server(void), resume(Chat *c), submit(void), start_send(Chat *c), request_dialog(void), layout(void), project_choices(void), show_projects(void);
@@ -57,8 +58,12 @@ static void show_about(HWND owner);
 static void draw_button(DRAWITEMSTRUCT *d);
 static void server_menu(void), server_choices(void), model_fill(void), model_details(void);
 static void activity_render(const char *text);
+static void coalesce_chat(Chat *keep);
 static LRESULT CALLBACK monitor_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp);
 static void update_fonts(void);
+static void visible(HWND w,int show);
+static void tray_refresh(void), remove_attachment(Chat *c,int index,int all);
+static LRESULT CALLBACK tray_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp);
 static int px(int n) { return MulDiv(n,app.dpi,96); }
 static void copytext(char *dst,size_t cap,const char *src) { snprintf(dst,cap,"%s",src); }
 static void settext(HWND w,const char *s) { wchar_t *v=wide(s); if(v && w) { int n=GetWindowTextLengthW(w); wchar_t *old=calloc((size_t)n+1,sizeof(*old)); if(old) { GetWindowTextW(w,old,n+1); if(wcscmp(old,v)) SetWindowTextW(w,v); free(old); } } free(v); }
@@ -70,9 +75,40 @@ static void schedule_save(void) { if(!app.restoring) SetTimer(app.window,IdSave,
 static void notice(const char *s) { copytext(app.notice,sizeof(app.notice),s); controls(); }
 static void freshkey(char out[65]) { GUID id; if(SUCCEEDED(CoCreateGuid(&id))) snprintf(out,65,"%08lx%04x%04x%02x%02x%02x%02x%02x%02x%02x%02x",(unsigned long)id.Data1,id.Data2,id.Data3,id.Data4[0],id.Data4[1],id.Data4[2],id.Data4[3],id.Data4[4],id.Data4[5],id.Data4[6],id.Data4[7]); else snprintf(out,65,"%lu-%llu",(unsigned long)GetCurrentProcessId(),(unsigned long long)GetTickCount64()); }
 static int addchat(Chat *c) { if(!c) return 0; if(app.count==app.capacity) { size_t cap=app.capacity?app.capacity*2:16; Chat **next=realloc(app.chats,cap*sizeof(*next)); if(!next) { chat_free(c); return 0; } app.chats=next; app.capacity=cap; } app.chats[app.count++]=c; return 1; }
-static Chat *findchat(const char *id) { size_t i; if(!*id) return NULL; for(i=0;i<app.count;i++) if(!strcmp(id,app.chats[i]->id)||!strcmp(id,app.chats[i]->stored)||!strcmp(id,app.chats[i]->key)) return app.chats[i]; return NULL; }
-static void newchat(void) { char key[65]; Chat *c; freshkey(key); c=chat_new(key); if(!c) return; copytext(c->cwd,sizeof(c->cwd),app.newcwd); if(!addchat(c)) return; app.current=c; app.notice[0]=0; sidebar(); render(); schedule_save(); SetFocus(app.prompt); }
-static void clear_chats(void) { size_t i; app.view_valid=0; app.view_chat=app.activity_chat=NULL; app.treebusy=1; TreeView_DeleteAllItems(app.tree); app.nrows=app.ngroups=0; app.treebusy=0; for(i=0;i<app.count;i++) chat_free(app.chats[i]); free(app.chats); app.chats=NULL; app.count=app.capacity=0; app.current=NULL; }
+static Chat *findchat(const char *id) { size_t i; if(!*id) return NULL; for(i=0;i<app.count;i++) if(chat_matches(app.chats[i],id)) return app.chats[i]; return NULL; }
+static int chat_visible(const Chat *c) { return !*c->stored||c->listed||c->running||c->pending||*c->draft||cJSON_GetArraySize(c->attachments)||c==app.current; }
+static void newchat(void) { char key[65]; Chat *c; freshkey(key); c=chat_new(key); if(!c) return; copytext(c->cwd,sizeof(c->cwd),app.newcwd); c->order=++app.order_clock; copytext(c->source,sizeof(c->source),"desktop"); if(!addchat(c)) return; app.current=c; app.notice[0]=0; sidebar(); render(); schedule_save(); SetFocus(app.prompt); }
+static void clear_chats(void) { size_t i; Upload *u; for(u=app.upload_jobs;u;u=u->next) u->chat=NULL; app.view_valid=0; app.view_chat=app.activity_chat=NULL; app.treebusy=1; TreeView_DeleteAllItems(app.tree); app.nrows=app.ngroups=0; app.treebusy=0; for(i=0;i<app.count;i++) chat_free(app.chats[i]); free(app.chats); app.chats=NULL; app.count=app.capacity=0; app.current=NULL; }
+static void upload_done(Upload *u) { Upload **link=&app.upload_jobs; while(*link&&*link!=u) link=&(*link)->next; if(*link) *link=u->next; free(u); }
+static void merge_attachments(cJSON *target,const cJSON *source) {
+    const cJSON *a,*b; cJSON_ArrayForEach(a,source) { int found=0; cJSON_ArrayForEach(b,target) if(!strcmp(js(a,"path"),js(b,"path"))&&!strcmp(js(a,"local"),js(b,"local"))) { found=1; break; } if(!found) cJSON_AddItemToArray(target,cJSON_Duplicate(a,1)); }
+}
+static void coalesce_chat(Chat *keep) {
+    size_t i,j; if(!keep||!*keep->stored) return;
+    for(i=0;i<app.count;) {
+        Chat *other=app.chats[i]; Pending *p; Upload *u; const cJSON *media; int same_runtime;
+        if(other==keep||(!chat_matches(other,keep->stored)&&(!*keep->list_id||!chat_matches(other,keep->list_id)))) { i++; continue; }
+        /* Identity only: equal titles are separate conversations. Preserve a second
+           distinct unsent draft as a local draft instead of dropping its text/files. */
+        if(*other->draft&&*keep->draft&&strcmp(other->draft,keep->draft)) {
+            cJSON *saved=chat_json(other); Chat *draft=chat_restore(saved); cJSON_Delete(saved);
+            if(!draft) { i++; continue; } freshkey(draft->key); draft->id[0]=draft->stored[0]=draft->list_id[0]=0; draft->started_at=0; draft->order=++app.order_clock; draft->completed_unread=draft->unread=0; cJSON_Delete(draft->media); draft->media=cJSON_CreateObject();
+            { char title[256]; snprintf(title,sizeof(title),"Draft: %.240s",draft->title); copytext(draft->title,sizeof(draft->title),title); } if(!addchat(draft)) { i++; continue; }
+        } else { if(!*keep->draft&&*other->draft) { free(keep->draft); keep->draft=textdup(other->draft); } merge_attachments(keep->attachments,other->attachments); }
+        cJSON_ArrayForEach(media,other->media) { cJSON *existing=cJSON_GetObjectItemCaseSensitive(keep->media,media->string); if(!existing) cJSON_AddItemToObject(keep->media,media->string,cJSON_Duplicate(media,1)); else if(cJSON_IsArray(existing)&&cJSON_IsArray(media)) merge_attachments(existing,media); }
+        same_runtime=!strcmp(keep->id,other->id);
+        if(other->loaded&&(!keep->loaded||(same_runtime&&other->sequence>keep->sequence))) { cJSON_Delete(keep->messages); keep->messages=cJSON_Duplicate(other->messages,1); cJSON_Delete(keep->requests); keep->requests=cJSON_Duplicate(other->requests,1); keep->stream=other->stream; keep->loaded=1; keep->sequence=other->sequence; if(*other->id) copytext(keep->id,sizeof(keep->id),other->id); }
+        if(same_runtime&&other->sequence>keep->sequence) keep->sequence=other->sequence;
+        if(!keep->started_at) keep->started_at=other->started_at; if(!*keep->source) copytext(keep->source,sizeof(keep->source),other->source);
+        keep->unread|=other->unread; keep->completed_unread|=other->completed_unread; keep->running|=other->running; keep->pending|=other->pending; keep->listed|=other->listed;
+        for(p=app.pending;p;p=p->next) if(p->chat==other) p->chat=keep;
+        for(u=app.upload_jobs;u;u=u->next) if(u->chat==other) u->chat=keep;
+        if(app.current==other) app.current=keep; if(app.model_chat==other) app.model_chat=keep;
+        if(app.view_chat==other||app.view_chat==keep) { app.view_chat=keep; app.view_valid=0; } if(app.activity_chat==other) app.activity_chat=NULL;
+        app.treebusy=1; for(j=0;j<app.nrows;) if(app.rows[j].chat==other) { TreeView_DeleteItem(app.tree,app.rows[j].item); memmove(app.rows+j,app.rows+j+1,(app.nrows-j-1)*sizeof(*app.rows)); app.nrows--; } else j++; app.treebusy=0;
+        memmove(app.chats+i,app.chats+i+1,(app.count-i-1)*sizeof(*app.chats)); app.count--; chat_free(other);
+    }
+}
 static void profile_load(const char *url,const char *user) {
     cJSON *profiles=cJSON_GetObjectItemCaseSensitive(app.settings,"profiles"),*p,*a,*v; const char *active;
     clear_chats(); app.profile=NULL;
@@ -81,8 +117,10 @@ static void profile_load(const char *url,const char *user) {
     cJSON_ArrayForEach(p,profiles) if(!strcmp(js(p,"url"),url)&&!strcmp(js(p,"user"),user)) { app.profile=p; break; }
     if(!app.profile) { app.profile=cJSON_CreateObject(); put(app.profile,"url",url); put(app.profile,"user",user); cJSON_AddItemToArray(profiles,app.profile); }
     copytext(app.newcwd,sizeof(app.newcwd),js(app.profile,"workspace"));
-    a=cJSON_GetObjectItemCaseSensitive(app.profile,"chats"); cJSON_ArrayForEach(v,a) if(app.count<1000) addchat(chat_restore(v));
+    a=cJSON_GetObjectItemCaseSensitive(app.profile,"chats"); cJSON_ArrayForEach(v,a) if(app.count<1000) { Chat *c=chat_restore(v); if(c&&c->order>app.order_clock) app.order_clock=c->order; addchat(c); }
+    { size_t i; for(i=0;i<app.count;i++) coalesce_chat(app.chats[i]); }
     active=js(app.profile,"active"); app.current=findchat(active); if(!app.current&&app.count) app.current=app.chats[0]; if(!app.current) newchat();
+    if(app.current) app.current->unread=app.current->completed_unread=0;
     put(app.settings,"active_url",url); put(app.settings,"active_user",user);
     project_choices();
 }
@@ -140,12 +178,13 @@ static void controls(void) {
     Chat *c=app.current; char line[1200],label[256],log[22000]; size_t used=0,i,working=0; const cJSON *entry; int ready=app.connected&&c&&!c->pending&&!app.uploads;
     EnableWindow(app.send,ready); EnableWindow(app.attach,ready&&c&&!c->running); settext(app.send,c&&c->running?"stop":"send");
     snprintf(line,sizeof(line),"%s  |  %s",app.connecting?"Connecting":app.connected?"Connected":"Offline",*app.notice?app.notice:c&&*c->activity?c->activity:"Ready");
-    settext(app.status,line); settext(app.request,c&&cJSON_GetArraySize(c->requests)?"answer request":"export chat");
+    settext(app.status,line); EnableMenuItem(GetMenu(app.window),IdRequest,MF_BYCOMMAND|(c&&cJSON_GetArraySize(c->requests)?MF_ENABLED:MF_GRAYED));
+    tray_refresh(); visible(app.request,c&&cJSON_GetArraySize(c->requests)&&MulDiv(app.width,96,app.dpi)>=820);
     if(c&&*c->model) copytext(label,sizeof(label),c->model); else if(*app.newmodel) copytext(label,sizeof(label),app.newmodel); else snprintf(label,sizeof(label),"Server default%s%s",*app.default_model?": ":"",app.default_model); settext(app.model,label);
     settext(app.title,c?c->title:"new chat");
     if(c&&*c->reasoning) { snprintf(line,sizeof(line),"%s  /  %s",label,c->reasoning); settext(app.model,line); }
-    for(i=0;i<app.count;i++) if(app.chats[i]->running) working++;
-    snprintf(line,sizeof(line),"%zu chats  |  %zu working",app.count,working); settext(app.summary,line);
+    for(i=0;i<app.count;i++) { if(app.chats[i]->running) working++; if(chat_visible(app.chats[i])) used++; }
+    snprintf(line,sizeof(line),"%zu chats  |  %zu working",used,working); used=0; settext(app.summary,line);
     if(c && c->running) snprintf(line,sizeof(line),"%s...",*c->activity?c->activity:"Working"); else snprintf(line,sizeof(line),"%s",c&&*c->activity?c->activity:"Ready");
     settext(app.activityhead,line); ShowWindow(app.progress,app.monitor_visible&&c&&c->running?SW_SHOW:SW_HIDE); SendMessageW(app.progress,PBM_SETMARQUEE,c&&c->running,80);
     log[0]=0; if(c) cJSON_ArrayForEach(entry,c->activity_log) if(cJSON_IsString(entry) && used+strlen(entry->valuestring)+7<sizeof(log)) { int n=snprintf(log+used,sizeof(log)-used,"\xe2\x80\xa2 %s\r\n",entry->valuestring); if(n>0) used+=(size_t)n; }
@@ -153,6 +192,7 @@ static void controls(void) {
     EnableWindow(app.projectbutton,app.connected&&app.projects_supported); EnableWindow(app.workspace,app.connected&&app.projects_supported);
     if(app.serverwin) { snprintf(line,sizeof(line),"%s%s%s",app.connecting?"Connecting":app.connected?"Connected":"Offline",*app.notice?" / ":"",app.notice); settext(GetDlgItem(app.serverwin,508),line); EnableWindow(GetDlgItem(app.serverwin,505),!app.connecting); }
 }
+static int CALLBACK chat_order(LPARAM a,LPARAM b,LPARAM context) { const Chat *x=(Chat *)a,*y=(Chat *)b; (void)context; if(x->order!=y->order) return x->order>y->order?-1:1; return strcmp(x->key,y->key); }
 static void sidebar(void) {
     size_t i,j; char *filter=gettext(app.search); wchar_t *query=wide(filter); HTREEITEM selected=NULL,first=TreeView_GetFirstVisible(app.tree); free(filter);
     app.treebusy=1; SendMessageW(app.tree,WM_SETREDRAW,FALSE,0);
@@ -165,7 +205,7 @@ static void sidebar(void) {
         Chat *c=app.chats[i]; TVINSERTSTRUCTW item={0}; wchar_t label[360],oldlabel[360], *title=wide(c->title); HTREEITEM h=NULL,parent=NULL; TreeRow *row=NULL; int newgroup=0;
         if(!title) continue;
         for(j=0;j<app.nrows;j++) if(app.rows[j].chat==c) { row=&app.rows[j]; break; }
-        if(query&&*query&&!StrStrIW(title,query)) { if(row) { TreeView_DeleteItem(app.tree,row->item); memmove(row,row+1,(app.nrows-j-1)*sizeof(*row)); app.nrows--; } free(title); continue; }
+        if(!chat_visible(c)||(query&&*query&&!StrStrIW(title,query))) { if(row) { TreeView_DeleteItem(app.tree,row->item); memmove(row,row+1,(app.nrows-j-1)*sizeof(*row)); app.nrows--; } free(title); continue; }
         for(j=0;j<app.ngroups;j++) if(!strcmp(app.groups[j].path,c->cwd)) { parent=app.groups[j].item; break; }
         if(!parent && app.ngroups<1000) {
             char group[1400]; wchar_t *name;
@@ -178,7 +218,7 @@ static void sidebar(void) {
             current.hItem=parent; current.mask=TVIF_TEXT; current.pszText=old; current.cchTextMax=1400; TreeView_GetItem(app.tree,&current); if(label&&wcscmp(old,label)) { current.pszText=label; TreeView_SetItem(app.tree,&current); } free(label);
         }
         if(row && row->parent!=parent) { TreeView_DeleteItem(app.tree,row->item); memmove(row,row+1,(app.nrows-(size_t)(row-app.rows)-1)*sizeof(*row)); app.nrows--; row=NULL; }
-        swprintf(label,360,L"%ls%ls%ls",c->unread?L"* ":L"",title,c->running?L"  ...":L""); free(title);
+        swprintf(label,360,L"%ls%ls",title,c->running?L"  ...":L""); free(title);
         item.hParent=parent; item.hInsertAfter=TVI_LAST; item.item.mask=TVIF_TEXT|TVIF_PARAM|TVIF_IMAGE|TVIF_SELECTEDIMAGE; item.item.pszText=label; item.item.lParam=(LPARAM)c; item.item.iImage=item.item.iSelectedImage=c->running?ClassicRun:ClassicDocument;
         if(row) {
             TVITEMW old={0}; old.hItem=row->item; old.mask=TVIF_TEXT|TVIF_IMAGE; old.pszText=oldlabel; old.cchTextMax=360; TreeView_GetItem(app.tree,&old); h=row->item;
@@ -190,9 +230,32 @@ static void sidebar(void) {
     for(i=0;i<app.ngroups;) {
         if(!TreeView_GetChild(app.tree,app.groups[i].item)) { TreeView_DeleteItem(app.tree,app.groups[i].item); memmove(app.groups+i,app.groups+i+1,(app.ngroups-i-1)*sizeof(*app.groups)); app.ngroups--; } else i++;
     }
+    for(i=0;i<app.ngroups;i++) { TVSORTCB sort={app.groups[i].item,chat_order,0}; TreeView_SortChildrenCB(app.tree,&sort,FALSE); }
     if(selected && selected!=TreeView_GetSelection(app.tree) && (TreeView_GetItemState(app.tree,TreeView_GetParent(app.tree,selected),TVIS_EXPANDED)&TVIS_EXPANDED)) TreeView_SelectItem(app.tree,selected);
     if(first) { TVITEMW check={0}; check.hItem=first; check.mask=TVIF_PARAM; if(TreeView_GetItem(app.tree,&check)) TreeView_SelectSetFirstVisible(app.tree,first); }
     SendMessageW(app.tree,WM_SETREDRAW,TRUE,0); InvalidateRect(app.tree,NULL,FALSE); app.treebusy=0; free(query);
+}
+static void chat_date(const Chat *c,int full,wchar_t *out,int capacity) {
+    FILETIME utc,local; SYSTEMTIME time; ULARGE_INTEGER ticks; wchar_t date[80],clock[30]; out[0]=0;
+    if(!c->started_at) { if(!*c->stored) swprintf(out,capacity,L"Draft"); return; }
+    if(c->started_at<0||c->started_at>32503680000.0) return;
+    ticks.QuadPart=(unsigned long long)(c->started_at*10000000.0)+116444736000000000ULL; utc.dwLowDateTime=ticks.LowPart; utc.dwHighDateTime=ticks.HighPart;
+    if(!FileTimeToLocalFileTime(&utc,&local)||!FileTimeToSystemTime(&local,&time)) return;
+    GetDateFormatW(LOCALE_USER_DEFAULT,0,&time,full?L"MMM d, yyyy":L"MMM d",date,80); GetTimeFormatW(LOCALE_USER_DEFAULT,0,&time,L"HH:mm",clock,30); swprintf(out,capacity,L"%ls %ls",date,clock);
+}
+static COLORREF chat_ink(const Chat *c) { return c->completed_unread&&c!=app.current?RGB(26,77,161):app.ink; }
+static LRESULT tree_paint(NMTVCUSTOMDRAW *paint) {
+    if(paint->nmcd.dwDrawStage==CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+    if(paint->nmcd.dwDrawStage==CDDS_ITEMPREPAINT) return CDRF_NOTIFYPOSTPAINT;
+    if(paint->nmcd.dwDrawStage==CDDS_ITEMPOSTPAINT&&paint->nmcd.lItemlParam) {
+        Chat *c=(Chat *)paint->nmcd.lItemlParam; RECT r,client,title,meta; wchar_t date[120],detail[220],*name=wide(c->title),*source=wide(c->source); HGDIOBJ font; int selected=(paint->nmcd.uItemState&CDIS_SELECTED)!=0;
+        if(!name) { free(source); return CDRF_DODEFAULT; } TreeView_GetItemRect(app.tree,(HTREEITEM)paint->nmcd.dwItemSpec,&r,TRUE); GetClientRect(app.tree,&client); r.right=client.right-px(2);
+        SetDCBrushColor(paint->nmcd.hdc,selected?app.accent:app.fg); FillRect(paint->nmcd.hdc,&r,(HBRUSH)GetStockObject(DC_BRUSH)); SetBkMode(paint->nmcd.hdc,TRANSPARENT);
+        title=r; title.top+=px(1); title.bottom=title.top+px(16); title.right-=px(3); font=SelectObject(paint->nmcd.hdc,c->completed_unread&&c!=app.current?app.heading:app.normal); SetTextColor(paint->nmcd.hdc,chat_ink(c)); DrawTextW(paint->nmcd.hdc,name,-1,&title,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS|DT_NOPREFIX);
+        chat_date(c,0,date,120); swprintf(detail,220,L"%ls%ls%ls%ls",date,*date&&source&&*source?L"  /  ":L"",source?source:L"",c->running?L"  /  working":L"");
+        meta=r; meta.top+=px(17); meta.bottom=r.bottom; SelectObject(paint->nmcd.hdc,app.small); SetTextColor(paint->nmcd.hdc,c->completed_unread&&c!=app.current?chat_ink(c):app.muted); DrawTextW(paint->nmcd.hdc,detail,-1,&meta,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        if(selected&&GetFocus()==app.tree) DrawFocusRect(paint->nmcd.hdc,&r); SelectObject(paint->nmcd.hdc,font); free(name); free(source);
+    } return CDRF_DODEFAULT;
 }
 static void setformat(unsigned style) {
     CHARFORMAT2W f={0}; f.cbSize=sizeof(f); f.dwMask=CFM_COLOR|CFM_FACE|CFM_BOLD|CFM_ITALIC|CFM_SIZE|CFM_BACKCOLOR; f.crTextColor=(style&MdQuote)?app.muted:app.ink; f.crBackColor=app.fg; f.yHeight=app.speaker?180:(style&MdHeading)?240:200;
@@ -223,41 +286,120 @@ done:
     if(converter) IWICFormatConverter_Release(converter); if(scaler) IWICBitmapScaler_Release(scaler); if(frame) IWICBitmapFrameDecode_Release(frame); if(decoder) IWICBitmapDecoder_Release(decoder); IWICImagingFactory_Release(factory); return bitmap;
 }
 static LRESULT CALLBACK transcript_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR ref) {
-    LRESULT result=DefSubclassProc(w,msg,wp,lp); int i; (void)id;(void)ref;
+    LRESULT result=DefSubclassProc(w,msg,wp,lp); (void)id;(void)ref;
     if(msg==WM_PAINT||msg==WM_PRINTCLIENT) { HDC dc=msg==WM_PAINT?GetDC(w):(HDC)wp; RECT client; int saved=SaveDC(dc); HPEN pen=CreatePen(PS_SOLID,1,RGB(211,214,195)); HGDIOBJ old=SelectObject(dc,pen); size_t row; GetClientRect(w,&client); IntersectClipRect(dc,0,0,client.right,client.bottom);
         for(row=0;row<app.view_count;row++) if(app.view_rows[row].visible) { POINTL pos={0}; SendMessageW(w,EM_POSFROMCHAR,(WPARAM)&pos,app.view_rows[row].anchor);
             if(pos.y>=0&&pos.y<client.bottom&&pos.x+px(64)<client.right-px(12)) { MoveToEx(dc,pos.x+px(64),pos.y+px(16),NULL); LineTo(dc,client.right-px(12),pos.y+px(16)); }
         }
         SelectObject(dc,old); DeleteObject(pen);
-        for(i=0;i<app.npreviews;i++) { Preview *p=&app.previews[i]; POINTL pos={0}; SendMessageW(w,EM_POSFROMCHAR,(WPARAM)&pos,p->anchor);
-            if(pos.y>=-px(150)&&pos.y<client.bottom) { HDC source=CreateCompatibleDC(dc); HGDIOBJ old=SelectObject(source,p->bitmap); SetStretchBltMode(dc,HALFTONE); StretchBlt(dc,pos.x,pos.y,px(p->width),px(p->height),source,0,0,p->width,p->height,SRCCOPY); SelectObject(source,old); DeleteDC(source); }
-        } RestoreDC(dc,saved); if(msg==WM_PAINT) ReleaseDC(w,dc);
+        RestoreDC(dc,saved); if(msg==WM_PAINT) ReleaseDC(w,dc);
     }
     return result;
 }
 static void previews_clear(void) { int i; for(i=0;i<app.npreviews;i++) DeleteObject(app.previews[i].bitmap); app.npreviews=0; }
 static void show_attachments(const cJSON *array) {
     const cJSON *a; cJSON_ArrayForEach(a,array) {
-        wchar_t *name=wide(js(a,"name")), *local=wide(js(a,"local")); HBITMAP bitmap=NULL; int w=0,h=0;
-        if(local && !strncmp(js(a,"mime"),"image/",6) && app.npreviews<128) bitmap=image_bitmap(local,&w,&h);
-        if(bitmap) { CHARRANGE range={0}; int line; Preview *p=&app.previews[app.npreviews++]; SendMessageW(app.transcript,EM_EXGETSEL,0,(LPARAM)&range); p->bitmap=bitmap; p->width=w; p->height=h; p->anchor=range.cpMax; for(line=0;line<(h+12)/13+2;line++) append(L"\r\n",0); }
-        if(name) { append(name,MdQuote); append(L"\r\n",0); } free(name); free(local);
+        wchar_t *name=wide(*js(a,"name")?js(a,"name"):"File");
+        if(name) { append(L"Attached: ",MdQuote); append(name,MdQuote); append(L"\r\n",0); } free(name);
     }
 }
 static unsigned long long json_hash(const cJSON *value) {
     char *text=cJSON_PrintUnformatted(value); const unsigned char *p=(const unsigned char *)text; unsigned long long hash=14695981039346656037ULL;
     if(p) while(*p) { hash^=*p++; hash*=1099511628211ULL; } free(text); return hash;
 }
+static void tray_scroll(void) {
+    RECT r; SCROLLINFO info={sizeof(info),SIF_RANGE|SIF_PAGE|SIF_POS,0,0,0,0,0}; int width,count;
+    if(!app.tray) return; GetClientRect(app.tray,&r); width=MulDiv(r.right,96,app.dpi); count=cJSON_GetArraySize(app.current?app.current->attachments:NULL);
+    info.nMax=count*150+7; info.nPage=(UINT)(width>0?width:1); info.nPos=app.tray_offset; SetScrollInfo(app.tray,SB_HORZ,&info,TRUE); GetScrollInfo(app.tray,SB_HORZ,&info); app.tray_offset=info.nPos;
+}
+static void tray_refresh(void) {
+    Chat *c=app.current; const cJSON *a; unsigned long long hash=json_hash(c?c->attachments:NULL); int present=c&&cJSON_GetArraySize(c->attachments),index=0,changed=app.tray_chat!=c||app.tray_hash!=hash;
+    if(!app.tray) return;
+    if(changed) {
+        previews_clear(); if(app.tray_chat!=c) { app.tray_offset=0; app.tray_selected=0; }
+        cJSON_ArrayForEach(a,(c?c->attachments:NULL)) {
+            if(!strncmp(js(a,"mime"),"image/",6)&&*js(a,"local")&&app.npreviews<128) {
+                wchar_t *path=wide(js(a,"local")); int width=0,h=0; HBITMAP bitmap=path?image_bitmap(path,&width,&h):NULL; free(path);
+                if(bitmap) app.previews[app.npreviews++]=(Preview){bitmap,index,width,h};
+            } index++;
+        }
+        if(app.tray_selected>=index) app.tray_selected=index?index-1:0; app.tray_chat=c; app.tray_hash=hash;
+    }
+    if((app.tray_height!=0)!=(present!=0)||changed) layout();
+    visible(app.tray,present!=0); tray_scroll(); InvalidateRect(app.tray,NULL,FALSE);
+}
+static void remove_attachment(Chat *c,int index,int all) {
+    cJSON *a; if(!c||c->pending||c->running||app.uploads) return;
+    a=cJSON_GetArrayItem(c->attachments,index); if(!a) return;
+    if(jb(a,"queued")) {
+        cJSON *p; if(!app.connected) { notice("Reconnect before removing a queued attachment."); return; }
+        p=sessionparams(c); cJSON_AddStringToObject(p,"path",js(a,"path"));
+        if(rpc("image.detach",p,RpcDetach,c)) { copytext(app.pending->path,sizeof(app.pending->path),js(a,"path")); app.pending->confirmed=all; c->pending=1; }
+    } else {
+        cJSON_DeleteItemFromArray(c->attachments,index); schedule_save();
+        if(all&&cJSON_GetArraySize(c->attachments)) remove_attachment(c,cJSON_GetArraySize(c->attachments)-1,1);
+    } controls();
+}
+static void draw_tray(HDC dc) {
+    RECT client,card,title; int index=0,compact=MulDiv(app.height,96,app.dpi)<560,thumb=compact?32:47,locked=!app.current||app.current->pending||app.current->running||app.uploads; const cJSON *a; wchar_t header[100]; HGDIOBJ font;
+    GetClientRect(app.tray,&client); FillRect(dc,&client,app.face); classic_edge(dc,client,0); font=SelectObject(dc,app.small); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,app.muted);
+    swprintf(header,100,L"Attachments (%d)%ls",cJSON_GetArraySize(app.current?app.current->attachments:NULL),locked?L"  /  Sending...":L"  /  Ready to send"); title=(RECT){px(9),px(5),client.right-px(9),px(23)}; DrawTextW(dc,header,-1,&title,DT_SINGLELINE|DT_NOPREFIX);
+    cJSON_ArrayForEach(a,(app.current?app.current->attachments:NULL)) {
+        int x=8+index*150-app.tray_offset,i; wchar_t *name; RECT close,caption;
+        card=(RECT){px(x),px(26),px(x+142),px(compact?88:108)}; index++; if(card.right<=0||card.left>=client.right) continue;
+        FillRect(dc,&card,app.paper); classic_edge(dc,card,1); close=(RECT){card.right-px(21),card.top+px(3),card.right-px(3),card.top+px(21)};
+        SetTextColor(dc,locked?app.muted:app.ink); DrawTextW(dc,L"\x00d7",1,&close,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+        if(app.icons) ImageList_Draw(app.icons,ClassicAttach,dc,card.left+px(5),card.top+px(5),ILD_TRANSPARENT);
+        for(i=0;i<app.npreviews;i++) if(app.previews[i].anchor==index-1) {
+            Preview *p=&app.previews[i]; double ratio=100.0/p->width; int width,height; HDC source=CreateCompatibleDC(dc); HGDIOBJ old;
+            if(p->height*ratio>thumb) ratio=(double)thumb/p->height; width=(int)(p->width*ratio); height=(int)(p->height*ratio); old=SelectObject(source,p->bitmap);
+            SetStretchBltMode(dc,HALFTONE); StretchBlt(dc,card.left+px((142-width)/2),card.top+px(8+(thumb-height)/2),px(width),px(height),source,0,0,p->width,p->height,SRCCOPY); SelectObject(source,old); DeleteDC(source); break;
+        }
+        if(i==app.npreviews&&app.icons) ImageList_Draw(app.icons,ClassicDocument,dc,card.left+px(61),card.top+px(24),ILD_TRANSPARENT);
+        caption=(RECT){card.left+px(6),card.top+px(compact?40:60),card.right-px(6),card.bottom-px(4)}; name=wide(*js(a,"name")?js(a,"name"):"File"); SetTextColor(dc,app.ink); if(name) DrawTextW(dc,name,-1,&caption,DT_SINGLELINE|DT_CENTER|DT_END_ELLIPSIS|DT_NOPREFIX); free(name);
+        if(GetFocus()==app.tray&&app.tray_selected==index-1) { RECT focus=card; InflateRect(&focus,-px(3),-px(3)); DrawFocusRect(dc,&focus); }
+    } SelectObject(dc,font);
+}
+static LRESULT CALLBACK tray_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
+    switch(msg) {
+    case WM_PAINT: case WM_PRINTCLIENT: {
+        PAINTSTRUCT paint; RECT r; HDC dc=msg==WM_PAINT?BeginPaint(w,&paint):(HDC)wp,buffer=CreateCompatibleDC(dc); HBITMAP bitmap; HGDIOBJ old;
+        GetClientRect(w,&r); bitmap=CreateCompatibleBitmap(dc,r.right>0?r.right:1,r.bottom>0?r.bottom:1);
+        if(buffer&&bitmap) { old=SelectObject(buffer,bitmap); draw_tray(buffer); BitBlt(dc,0,0,r.right,r.bottom,buffer,0,0,SRCCOPY); SelectObject(buffer,old); } else draw_tray(dc);
+        if(bitmap) DeleteObject(bitmap); if(buffer) DeleteDC(buffer); if(msg==WM_PAINT) EndPaint(w,&paint); return 0;
+    }
+    case WM_ERASEBKGND: return 1;
+    case WM_SIZE: tray_scroll(); return 0;
+    case WM_GETDLGCODE: return DLGC_WANTARROWS;
+    case WM_MOUSEWHEEL: app.tray_offset-=GET_WHEEL_DELTA_WPARAM(wp)/WHEEL_DELTA*150; tray_scroll(); InvalidateRect(w,NULL,FALSE); return 0;
+    case WM_SETFOCUS: case WM_KILLFOCUS: InvalidateRect(w,NULL,FALSE); return 0;
+    case WM_HSCROLL: {
+        SCROLLINFO info={sizeof(info),SIF_ALL,0,0,0,0,0}; GetScrollInfo(w,SB_HORZ,&info);
+        switch(LOWORD(wp)) { case SB_LINELEFT: app.tray_offset-=150; break; case SB_LINERIGHT: app.tray_offset+=150; break; case SB_PAGELEFT: app.tray_offset-=(int)info.nPage; break; case SB_PAGERIGHT: app.tray_offset+=(int)info.nPage; break; case SB_THUMBTRACK: app.tray_offset=info.nTrackPos; break; }
+        tray_scroll(); InvalidateRect(w,NULL,FALSE); return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        int x=MulDiv(GET_X_LPARAM(lp),96,app.dpi),y=MulDiv(GET_Y_LPARAM(lp),96,app.dpi),index=(x+app.tray_offset-8)/150,inside=(x+app.tray_offset-8)%150;
+        if(y>=26&&y<=108&&x+app.tray_offset>=8) { app.tray_selected=index; SetFocus(w); if(inside>=121&&inside<=139&&y<=47) remove_attachment(app.current,index,0); InvalidateRect(w,NULL,FALSE); } return 0;
+    }
+    case WM_KEYDOWN: {
+        int count=cJSON_GetArraySize(app.current?app.current->attachments:NULL);
+        if(wp==VK_DELETE) remove_attachment(app.current,app.tray_selected,0);
+        else if((wp==VK_LEFT||wp==VK_RIGHT)&&count) { app.tray_selected+=wp==VK_LEFT?-1:1; if(app.tray_selected<0) app.tray_selected=0; if(app.tray_selected>=count) app.tray_selected=count-1; app.tray_offset=app.tray_selected*150; tray_scroll(); InvalidateRect(w,NULL,FALSE); }
+        return 0;
+    }
+    } return DefWindowProcW(w,msg,wp,lp);
+}
 static LONG transcript_end(void) { CHARRANGE range={0}; SendMessageW(app.transcript,EM_SETSEL,-1,-1); SendMessageW(app.transcript,EM_EXGETSEL,0,(LPARAM)&range); return range.cpMax; }
 static void render(void) {
     const cJSON *row; Chat *c=app.current; POINT scroll={0}; CHARRANGE selected={0}; BOOL atbottom=TRUE;
     SCROLLINFO info={sizeof(info),SIF_ALL,0,0,0,0,0}; wchar_t *draft; size_t n=c?(size_t)cJSON_GetArraySize(c->messages):0,i=0,first=0;
-    unsigned long long attachments=json_hash(c?c->attachments:NULL),*hashes=n?calloc(n,sizeof(*hashes)):NULL;
+    unsigned long long *hashes=n?calloc(n,sizeof(*hashes)):NULL;
     int full=!app.view_valid||app.view_chat!=c||!app.view_count||!n; LONG anchor=0;
     KillTimer(app.window,IdRender); app.render_pending=0; if(n&&!hashes) return;
     cJSON_ArrayForEach(row,(c?c->messages:NULL)) hashes[i++]=json_hash(row);
     if(!full) { while(first<n&&first<app.view_count&&app.view_rows[first].hash==hashes[first]) first++;
-        if(first==n&&first==app.view_count&&attachments==app.view_attachments) goto unchanged;
+        if(first==n&&first==app.view_count) goto unchanged;
         anchor=first<app.view_count?app.view_rows[first].anchor:app.view_tail;
     }
     if(n>app.view_capacity) { RenderRow *rows=realloc(app.view_rows,n*sizeof(*rows)); if(!rows) { free(hashes); return; } app.view_rows=rows; app.view_capacity=n; }
@@ -265,10 +407,8 @@ static void render(void) {
     if(app.view_chat==c&&GetScrollInfo(app.transcript,SB_VERT,&info)) atbottom=info.nPos+(int)info.nPage>=info.nMax-4;
     if(app.view_chat==c&&selected.cpMin!=selected.cpMax) atbottom=FALSE;
     SendMessageW(app.transcript,WM_SETREDRAW,FALSE,0);
-    if(full) { previews_clear(); SetWindowTextW(app.transcript,L""); first=0; }
-    else { int j; CHARRANGE tail={anchor,-1}; SendMessageW(app.transcript,EM_EXSETSEL,0,(LPARAM)&tail); SendMessageW(app.transcript,EM_REPLACESEL,FALSE,(LPARAM)L"");
-        for(j=0;j<app.npreviews;) if(app.previews[j].anchor>=anchor) { DeleteObject(app.previews[j].bitmap); memmove(app.previews+j,app.previews+j+1,(size_t)(app.npreviews-j-1)*sizeof(*app.previews)); app.npreviews--; } else j++;
-    }
+    if(full) { SetWindowTextW(app.transcript,L""); first=0; }
+    else { CHARRANGE tail={anchor,-1}; SendMessageW(app.transcript,EM_EXSETSEL,0,(LPARAM)&tail); SendMessageW(app.transcript,EM_REPLACESEL,FALSE,(LPARAM)L""); }
     SendMessageW(app.transcript,EM_SETBKGNDCOLOR,0,app.fg); transcript_end(); app.paragraph_start=1; app.speaker=0;
     i=0; cJSON_ArrayForEach(row,(c?c->messages:NULL)) {
         char *text; wchar_t *w; const char *role; const cJSON *media; size_t length;
@@ -284,10 +424,9 @@ static void render(void) {
         show_attachments(media); w=wide(text); if(w) markdown_render(w,emit_markdown,NULL); if(!app.paragraph_start) append(L"\r\n",0); free(text); free(w);
     }
     app.view_tail=transcript_end();
-    if(c&&cJSON_GetArraySize(c->attachments)) { append(L"Attached for your next message\r\n",MdQuote); show_attachments(c->attachments); }
     if(atbottom) { SendMessageW(app.transcript,EM_SETSEL,-1,-1); SendMessageW(app.transcript,EM_SCROLLCARET,0,0); }
     else { SendMessageW(app.transcript,EM_EXSETSEL,0,(LPARAM)&selected); SendMessageW(app.transcript,EM_SETSCROLLPOS,0,(LPARAM)&scroll); }
-    app.view_chat=c; app.view_count=n; app.view_attachments=attachments; app.view_valid=1;
+    app.view_chat=c; app.view_count=n; app.view_valid=1;
     SendMessageW(app.transcript,WM_SETREDRAW,TRUE,0); RedrawWindow(app.transcript,NULL,NULL,RDW_INVALIDATE|RDW_ERASE|RDW_FRAME|RDW_UPDATENOW);
 unchanged:
     free(hashes); app.restoring=1; draft=wide(c?c->draft:"");
@@ -299,13 +438,18 @@ static void send_prompt(Chat *c) {
     cJSON_AddStringToObject(p,"text",wire); cJSON_AddStringToObject(p,"surface","desktop"); free(wire);
     { int ordinal=0; char key[40]; const cJSON *m; cJSON_ArrayForEach(m,c->messages) if(!strcmp(js(m,"role"),"user")) ordinal++; snprintf(key,sizeof(key),"%d",ordinal); cJSON_DeleteItemFromObjectCaseSensitive(c->media,key); cJSON_AddItemToObject(c->media,key,cJSON_Duplicate(c->attachments,1)); }
     cJSON_AddStringToObject(row,"role","user"); cJSON_AddStringToObject(row,"text",c->draft); cJSON_AddItemToObject(row,"attachments",cJSON_Duplicate(c->attachments,1)); cJSON_AddItemToArray(c->messages,row);
-    cJSON_Delete(c->attachments); c->attachments=cJSON_CreateArray(); c->running=1; c->pending=1; c->stream=-1;
+    c->running=1; c->pending=1; c->stream=-1;
     rpc("prompt.submit",p,RpcSubmit,c); if(c==app.current) render(); sidebar(); controls();
 }
 static void start_send(Chat *c) {
     c->pending=1;
     const cJSON *a; int attached=0;
-    cJSON_ArrayForEach(a,c->attachments) if(!strncmp(js(a,"mime"),"image/",6) && !jb(a,"queued")) { cJSON *p=sessionparams(c); cJSON_AddStringToObject(p,"path",js(a,"path")); rpc("image.attach",p,RpcAttach,c); attached=1; break; }
+    cJSON_ArrayForEach(a,c->attachments) if(!strncmp(js(a,"mime"),"image/",6) && !jb(a,"queued")) {
+        cJSON *p=sessionparams(c); cJSON_AddStringToObject(p,"path",js(a,"path"));
+        /* Detach is idempotent and only removes this path from the next-turn queue.
+           A reconnect may have left it queued even when its acknowledgement was lost. */
+        if(rpc("image.detach",p,RpcImageReset,c)) copytext(app.pending->path,sizeof(app.pending->path),js(a,"path")); attached=1; break;
+    }
     if(!attached) send_prompt(c);
 }
 static void submit(void) {
@@ -325,8 +469,10 @@ static void incoming_event(cJSON *e) {
     if(chat_event(c,e)) {
         int content=!strcmp(type,"message.delta")||!strcmp(type,"message.complete")||!strcmp(type,"message.interim");
         if(c==app.current && content && !app.render_pending) { app.render_pending=1; SetTimer(app.window,IdRender,40,NULL); } else if(c!=app.current) c->unread=1;
+        if(!strcmp(type,"session.info")) coalesce_chat(c);
+        if(!strcmp(type,"message.start")) { c->completed_unread=0; c->order=++app.order_clock; }
         if(!strcmp(type,"session.info")||!strcmp(type,"session.title")||!strcmp(type,"message.start")) { sidebar(); schedule_save(); }
-        if(!strcmp(type,"message.complete")) { c->unread=c!=app.current; app.notice[0]=0; sidebar(); schedule_save();
+        if(!strcmp(type,"message.complete")) { c->unread=c->completed_unread=c!=app.current; c->order=++app.order_clock; app.notice[0]=0; sidebar(); schedule_save();
             if(GetForegroundWindow()!=app.window || c!=app.current) { FLASHWINFO flash={sizeof(flash),app.window,FLASHW_TRAY,2,0}; FlashWindowEx(&flash); MessageBeep(MB_OK); }
             if(c==app.current && *js(p,"error")) notice(js(p,"error")); listchats();
         } controls();
@@ -345,20 +491,36 @@ static void result(Pending *wait,const cJSON *r,const char *error) {
         else if(wait->kind==RpcProjects) { app.projects_supported=0; project_choices(); }
         else if(wait->kind!=RpcDefaultModel&&wait->kind!=RpcProjectTree) notice(error); if(wait->kind==RpcModels) app.models_pending=0;
         if(app.projectwin && (wait->kind==RpcProjectCreate||wait->kind==RpcProjectAdd)) settext(GetDlgItem(app.projectwin,608),error);
-        if(c&&wait->kind==RpcAttach) { cJSON *a; cJSON_ArrayForEach(a,c->attachments) if(jb(a,"queued")) { cJSON *p=sessionparams(c); cJSON_AddStringToObject(p,"path",js(a,"path")); rpc("image.detach",p,0,NULL); cJSON_DeleteItemFromObjectCaseSensitive(a,"queued"); } }
         controls(); return; }
     switch(wait->kind) {
-    case RpcList:
-        array=cJSON_GetObjectItemCaseSensitive(r,"sessions"); cJSON_ArrayForEach(v,array) { const char *id=js(v,"session_id"); Chat *found; if(!*id) id=js(v,"id"); if(!*id) continue; found=findchat(id);
-            if(!found && app.count<1000) { char key[65]; freshkey(key); found=chat_new(key); if(found) { copytext(found->stored,sizeof(found->stored),id); if(!addchat(found)) found=NULL; } }
-            if(found && *js(v,"title")) copytext(found->title,sizeof(found->title),js(v,"title"));
-        } tree_metadata(); sidebar(); break;
-    case RpcResume: if(c) { chat_load(c,r); { cJSON *p=sessionparams(c); cJSON_AddStringToObject(p,"key","reasoning"); rpc("config.get",p,RpcReasoning,c); } if(c==app.current) { c->unread=0; render(); } sidebar(); schedule_save(); } break;
-    case RpcCreate: case RpcResumeSend: if(c) { char requested[1024]; copytext(requested,sizeof(requested),c->cwd); chat_load(c,r);
+    case RpcList: {
+        size_t i; unsigned long long position=0,base;
+        array=cJSON_GetObjectItemCaseSensitive(r,"sessions"); if(!cJSON_IsArray(array)) break;
+        base=app.order_clock+(unsigned long long)cJSON_GetArraySize(array)+1; app.order_clock=base;
+        /* A full listing hides missing server references without erasing local data.
+           A capped listing cannot prove that an older session was removed. */
+        if(cJSON_GetArraySize(array)<500) for(i=0;i<app.count;i++) if(*app.chats[i]->stored) app.chats[i]->listed=0;
+        cJSON_ArrayForEach(v,array) {
+            const char *id=*js(v,"id")?js(v,"id"):js(v,"session_id"),*resolved=js(v,"resolved_id"); Chat *found;
+            if(!*id) continue; found=*resolved?findchat(resolved):NULL; if(!found) found=findchat(id);
+            if(!found&&app.count<1000) { char key[65]; freshkey(key); found=chat_new(key); if(found&&!addchat(found)) found=NULL; }
+            if(found) { chat_listing(found,v,base-position); coalesce_chat(found); } position++;
+        } tree_metadata(); sidebar(); schedule_save(); break;
+    }
+    case RpcResume: if(c) { chat_load(c,r); coalesce_chat(c); { cJSON *p=sessionparams(c); cJSON_AddStringToObject(p,"key","reasoning"); rpc("config.get",p,RpcReasoning,c); } if(c==app.current) { c->unread=c->completed_unread=0; render(); } sidebar(); schedule_save(); } break;
+    case RpcCreate: case RpcResumeSend: if(c) { char requested[1024]; copytext(requested,sizeof(requested),c->cwd); chat_load(c,r); coalesce_chat(c);
         if(wait->kind==RpcCreate && *requested && strcmp(requested,c->cwd)) { notice("Hermes opened a different folder. Review the workspace before sending."); sidebar(); render(); } else start_send(c); } break;
-    case RpcSubmit: if(c) { c->pending=0; free(c->draft); c->draft=textdup(""); if(c==app.current) { app.restoring=1; SetWindowTextW(app.prompt,L""); app.restoring=0; } schedule_save(); } break;
+    case RpcSubmit: if(c) { c->pending=0; free(c->draft); c->draft=textdup(""); cJSON_Delete(c->attachments); c->attachments=cJSON_CreateArray(); if(c==app.current) { app.restoring=1; SetWindowTextW(app.prompt,L""); app.restoring=0; } schedule_save(); } break;
+    case RpcImageReset: if(c) {
+        cJSON *p=sessionparams(c); cJSON_AddStringToObject(p,"path",wait->path);
+        if(rpc("image.attach",p,RpcAttach,c)) copytext(app.pending->path,sizeof(app.pending->path),wait->path);
+    } break;
     case RpcAttach:
-        if(c) { const cJSON *a; cJSON_ArrayForEach(a,c->attachments) if(!jb(a,"queued") && !strncmp(js(a,"mime"),"image/",6)) { cJSON_AddBoolToObject((cJSON *)a,"queued",1); break; } start_send(c); } break;
+        if(c) { cJSON *a; cJSON_ArrayForEach(a,c->attachments) if(!strcmp(js(a,"path"),wait->path)) { cJSON_DeleteItemFromObjectCaseSensitive(a,"queued"); cJSON_AddBoolToObject(a,"queued",1); if(*js(r,"path")) put(a,"path",js(r,"path")); break; } start_send(c); } break;
+    case RpcDetach: if(c) {
+        int i; c->pending=0; for(i=0;i<cJSON_GetArraySize(c->attachments);i++) if(!strcmp(js(cJSON_GetArrayItem(c->attachments,i),"path"),wait->path)) { cJSON_DeleteItemFromArray(c->attachments,i); break; }
+        schedule_save(); if(wait->confirmed&&cJSON_GetArraySize(c->attachments)) remove_attachment(c,cJSON_GetArraySize(c->attachments)-1,1);
+    } break;
     case RpcModels: cJSON_Delete(app.models); app.models=cJSON_Duplicate(r,1); app.models_pending=0; PostMessageW(app.window,WM_COMMAND,IdModel,0); break;
     case RpcProjects: cJSON_Delete(app.projects); app.projects=cJSON_Duplicate(r,1); app.projects_supported=1; project_choices(); break;
     case RpcProjectTree: cJSON_Delete(app.project_tree); app.project_tree=cJSON_Duplicate(r,1); tree_metadata(); project_choices(); sidebar(); schedule_save(); break;
@@ -411,10 +573,10 @@ static void on_net(NetMessage *m) {
     else if(m->kind==NetRest) {
         if(m->tag==RestStats) { app.stats_pending=0; if(app.connected&&!strcmp(m->url,app.url)) { cJSON_Delete(app.stats); app.stats=m->json?cJSON_Duplicate(m->json,1):NULL; app.stats_at=GetTickCount64(); status_stats(); } }
         else if(m->tag==RestUpload) { Upload *u=m->context; app.uploads--; if(u) {
-            if(m->json && *js(m->json,"path")) { cJSON *a=cJSON_CreateObject(); char *local=utf8(u->path),*name=utf8(wcsrchr(u->path,L'\\')?wcsrchr(u->path,L'\\')+1:u->path); const wchar_t *ext=wcsrchr(u->path,L'.');
+            if(u->chat&&m->json && *js(m->json,"path")) { cJSON *a=cJSON_CreateObject(); char *local=utf8(u->path),*name=utf8(wcsrchr(u->path,L'\\')?wcsrchr(u->path,L'\\')+1:u->path); const wchar_t *ext=wcsrchr(u->path,L'.');
                 cJSON_AddStringToObject(a,"path",js(m->json,"path")); cJSON_AddStringToObject(a,"local",local); cJSON_AddStringToObject(a,"name",name); cJSON_AddStringToObject(a,"mime",ext&&(!_wcsicmp(ext,L".png")||!_wcsicmp(ext,L".jpg")||!_wcsicmp(ext,L".jpeg")||!_wcsicmp(ext,L".webp")||!_wcsicmp(ext,L".gif"))?"image/local":"application/octet-stream");
                 cJSON_AddItemToArray(u->chat->attachments,a); free(local); free(name); if(u->chat==app.current) render(); schedule_save();
-            } else notice(*m->error?m->error:"Attachment upload failed."); free(u);
+            } else if(u->chat) notice(*m->error?m->error:"Attachment upload failed."); upload_done(u);
         } controls(); }
     }
     cJSON_Delete(m->json); SecureZeroMemory(m->cookie,sizeof(m->cookie)); free(m);
@@ -462,23 +624,26 @@ static void move(HWND w,int x,int y,int width,int height) {
 static void visible(HWND w,int show) { if(((GetWindowLongPtrW(w,GWL_STYLE)&WS_VISIBLE)!=0)!=show) ShowWindow(w,show?SW_SHOW:SW_HIDE); }
 static void inset_text(HWND w,int margin) { RECT r; GetClientRect(w,&r); InflateRect(&r,-px(margin),-px(margin)); if(r.right>r.left&&r.bottom>r.top) SendMessageW(w,EM_SETRECT,0,(LPARAM)&r); }
 static void layout(void) {
-    int w=MulDiv(app.width,96,app.dpi),h=MulDiv(app.height,96,app.dpi),left=app.sidebar_width,end=w-10,statsheight; TOOLINFOW tip={0};
+    int w=MulDiv(app.width,96,app.dpi),h=MulDiv(app.height,96,app.dpi),left=app.sidebar_width,end=w-10,statsheight,composer=h<520?64:88,count=cJSON_GetArraySize(app.current?app.current->attachments:NULL); TOOLINFOW tip={0};
     if(left<180) left=180; if(left>w-370) left=w-370;
     app.monitor_visible=app.show_monitor&&w-left>=660&&h>=560; if(app.monitor_visible) end=w-274;
     if(left>end-360) left=end-360; if(left<160) left=160; app.split_x=left; app.monitor_x=end+12;
+    app.tray_height=count?(h<560?96:116)+(count*150+8>end-left-24?MulDiv(GetSystemMetricsForDpi(SM_CYHSCROLL,(UINT)app.dpi),96,app.dpi):0):0; app.message_y=h-39-composer-24;
     app.positions=BeginDeferWindowPos(24);
     move(app.fresh,10,10,104,28); move(app.projectbutton,122,10,122,28); move(app.server,w-44,10,34,28); move(app.model,w-328,10,274,28);
     move(app.explorerhead,10,53,left-20,23); move(app.search,10,83,left-20,25); move(app.tree,10,116,left-20,h-245);
     move(app.workspace,10,h-94,left-20,200); move(app.summary,10,h-59,left-20,24);
-    move(app.title,left+12,53,end-left-24,24); move(app.transcript,left+12,83,end-left-24,h-267);
-    move(app.prompt,left+12,h-151,end-left-120,88); move(app.send,end-96,h-151,84,28); move(app.attach,end-96,h-115,84,26);
-    move(app.request,left+12,h-54,142,25); move(app.status,10,h-25,w-20,20);
+    move(app.title,left+12,53,end-left-24,24); move(app.transcript,left+12,83,end-left-24,app.message_y-app.tray_height-93);
+    move(app.tray,left+12,app.message_y-app.tray_height,end-left-24,app.tray_height);
+    move(app.prompt,left+12,h-39-composer,end-left-120,composer); move(app.send,end-96,h-39-composer,84,28); move(app.attach,end-96,h-3-composer,84,26);
+    move(app.request,252,10,126,28); move(app.status,10,h-25,w-20,20);
     statsheight=(h-190)/2; if(statsheight>342) statsheight=342; if(statsheight<240) statsheight=240;
     move(app.monitorhead,end+12,53,250,23); move(app.monitor,end+12,83,250,statsheight);
     move(app.activitytitle,end+12,statsheight+98,250,23); move(app.activityhead,end+16,statsheight+128,242,20);
     move(app.progress,end+16,statsheight+152,242,8); move(app.activityview,end+12,statsheight+168,250,h-statsheight-203);
     if(app.positions) EndDeferWindowPos(app.positions); app.positions=NULL;
     visible(app.monitorhead,app.monitor_visible); visible(app.monitor,app.monitor_visible); visible(app.activitytitle,app.monitor_visible); visible(app.activityhead,app.monitor_visible); visible(app.activityview,app.monitor_visible); visible(app.progress,app.monitor_visible&&app.current&&app.current->running);
+    visible(app.tray,app.tray_height!=0); visible(app.request,app.current&&cJSON_GetArraySize(app.current->requests)&&w>=820);
     inset_text(app.transcript,12); inset_text(app.activityview,8);
     tip.cbSize=sizeof(tip); tip.hwnd=app.window; tip.uId=1; tip.rect=(RECT){px(left-6),px(50),px(left+6),px(h-30)}; SendMessageW(app.tooltip,TTM_NEWTOOLRECTW,0,(LPARAM)&tip);
     RedrawWindow(app.window,NULL,NULL,RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN);
@@ -940,7 +1105,7 @@ static void attach(void) {
     OPENFILENAMEW ofn={0}; wchar_t path[32768]=L""; Upload *u;
     if(!app.connected||!app.current||app.current->running||app.current->pending) return;
     ofn.lStructSize=sizeof(ofn); ofn.hwndOwner=app.window; ofn.lpstrFile=path; ofn.nMaxFile=32768; ofn.lpstrFilter=L"Images and files\0*.png;*.jpg;*.jpeg;*.webp;*.gif;*.txt;*.md;*.pdf\0All files\0*.*\0"; ofn.Flags=OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|OFN_NOCHANGEDIR;
-    if(!GetOpenFileNameW(&ofn)) return; u=calloc(1,sizeof(*u)); if(!u) return; u->chat=app.current; wcscpy(u->path,path); app.uploads++; controls(); net_upload(app.net,path,RestUpload,u);
+    if(!GetOpenFileNameW(&ofn)) return; u=calloc(1,sizeof(*u)); if(!u) return; u->chat=app.current; wcscpy(u->path,path); u->next=app.upload_jobs; app.upload_jobs=u; app.uploads++; controls(); net_upload(app.net,path,RestUpload,u);
 }
 static void export_chat(void) {
     OPENFILENAMEW ofn={0}; wchar_t path[32768]=L"chat.md"; HANDLE file; DWORD written; const cJSON *r; char *output=NULL; size_t used=0;
@@ -955,12 +1120,13 @@ static LRESULT CALLBACK prompt_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR
     return DefSubclassProc(w,msg,wp,lp);
 }
 static HMENU workbench_menu(void) {
-    HMENU bar=CreateMenu(),file=CreatePopupMenu(),view=CreatePopupMenu(),server=CreatePopupMenu(),help=CreatePopupMenu();
-    AppendMenuW(file,MF_STRING,IdNew,L"&New chat\tCtrl+N"); AppendMenuW(file,MF_STRING,IdExport,L"&Export chat..."); AppendMenuW(file,MF_STRING,IdDelete,L"&Delete chat..."); AppendMenuW(file,MF_SEPARATOR,0,NULL); AppendMenuW(file,MF_STRING,IdExit,L"E&xit");
+    HMENU bar=CreateMenu(),file=CreatePopupMenu(),view=CreatePopupMenu(),chat=CreatePopupMenu(),server=CreatePopupMenu(),help=CreatePopupMenu();
+    AppendMenuW(file,MF_STRING,IdNew,L"&New chat\tCtrl+N"); AppendMenuW(file,MF_SEPARATOR,0,NULL); AppendMenuW(file,MF_STRING,IdExit,L"E&xit");
+    AppendMenuW(chat,MF_STRING,IdRename,L"&Rename chat..."); AppendMenuW(chat,MF_STRING,IdExport,L"&Export chat..."); AppendMenuW(chat,MF_STRING,IdDelete,L"&Delete chat..."); AppendMenuW(chat,MF_SEPARATOR,0,NULL); AppendMenuW(chat,MF_STRING,IdRequest,L"&Answer Hermes request..."); AppendMenuW(chat,MF_STRING,IdRemoveAttachment,L"Clear draft attachments");
     AppendMenuW(view,MF_STRING|MF_CHECKED,IdMonitor,L"&Server monitor"); AppendMenuW(view,MF_STRING,IdWider,L"Wider chat list"); AppendMenuW(view,MF_STRING,IdNarrower,L"Narrower chat list"); AppendMenuW(view,MF_SEPARATOR,0,NULL); AppendMenuW(view,MF_STRING,IdExpand,L"&Expand folders"); AppendMenuW(view,MF_STRING,IdCollapse,L"&Collapse folders");
     AppendMenuW(server,MF_STRING,IdManageServers,L"&Server manager..."); AppendMenuW(server,MF_STRING,IdAddServer,L"&Add server..."); AppendMenuW(server,MF_STRING,IdReconnect,L"&Reconnect\tCtrl+R"); AppendMenuW(server,MF_STRING,IdRefresh,L"&Refresh chats and workspaces"); AppendMenuW(server,MF_STRING,IdProjects,L"&Workspaces and folders...");
     AppendMenuW(help,MF_STRING,IdAbout,L"&About lcb-hermes...");
-    AppendMenuW(bar,MF_POPUP,(UINT_PTR)file,L"&File"); AppendMenuW(bar,MF_POPUP,(UINT_PTR)view,L"&View"); AppendMenuW(bar,MF_POPUP,(UINT_PTR)server,L"&Server"); AppendMenuW(bar,MF_POPUP,(UINT_PTR)help,L"&Help"); return bar;
+    AppendMenuW(bar,MF_POPUP,(UINT_PTR)file,L"&File"); AppendMenuW(bar,MF_POPUP,(UINT_PTR)view,L"&View"); AppendMenuW(bar,MF_POPUP,(UINT_PTR)chat,L"&Chat"); AppendMenuW(bar,MF_POPUP,(UINT_PTR)server,L"&Server"); AppendMenuW(bar,MF_POPUP,(UINT_PTR)help,L"&Help"); return bar;
 }
 static void paint_header(HDC dc,HWND childwindow) {
     RECT r; GetWindowRect(childwindow,&r); MapWindowPoints(NULL,app.window,(POINT *)&r,2); InflateRect(&r,4,3); SetDCBrushColor(dc,app.accent); FillRect(dc,&r,(HBRUSH)GetStockObject(DC_BRUSH)); classic_edge(dc,r,1);
@@ -972,20 +1138,21 @@ static void draw_workbench(HDC dc) {
     r=(RECT){px(app.split_x-4),px(50),px(app.split_x+4),px(height-31)}; classic_edge(dc,r,1);
     { int y; for(y=height/2-16;y<height/2+16;y+=4) { RECT dot={px(app.split_x-1),px(y),px(app.split_x+1),px(y+2)}; SetDCBrushColor(dc,app.muted); FillRect(dc,&dot,(HBRUSH)GetStockObject(DC_BRUSH)); } }
     SetBkMode(dc,TRANSPARENT); SetTextColor(dc,app.muted);
-    { const wchar_t *folder=L"Folder for new chats",*message=L"Message  /  Ctrl+Enter to send"; TextOutW(dc,px(12),px(height-118),folder,(int)wcslen(folder)); TextOutW(dc,px(app.split_x+14),px(height-176),message,(int)wcslen(message)); }
+    { const wchar_t *folder=L"Folder for new chats",*message=L"Message  /  Ctrl+Enter to send"; TextOutW(dc,px(12),px(height-118),folder,(int)wcslen(folder)); TextOutW(dc,px(app.split_x+14),px(app.message_y),message,(int)wcslen(message)); }
     r=(RECT){px(4),px(height-28),app.width-px(4),app.height-px(3)}; classic_edge(dc,r,0); SelectObject(dc,old);
 }
 static BOOL CALLBACK font_child(HWND w,LPARAM value) { SendMessageW(w,WM_SETFONT,(WPARAM)value,TRUE); return TRUE; }
 static void update_fonts(void) {
-    HFONT normal=app.normal,fixed=app.fixed,heading=app.heading,brand=app.brandfont;
+    HFONT normal=app.normal,fixed=app.fixed,heading=app.heading,brand=app.brandfont,small=app.small;
     app.normal=CreateFontW(-px(13),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Tahoma");
     app.fixed=CreateFontW(-px(12),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
+    app.small=CreateFontW(-px(11),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Tahoma");
     app.heading=CreateFontW(-px(13),0,0,0,FW_BOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Tahoma");
     app.brandfont=CreateFontW(-px(21),0,0,0,FW_BOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Tahoma");
     EnumChildWindows(app.window,font_child,(LPARAM)app.normal); if(app.serverwin) EnumChildWindows(app.serverwin,font_child,(LPARAM)app.normal); if(app.projectwin) EnumChildWindows(app.projectwin,font_child,(LPARAM)app.normal); if(app.aboutwin) EnumChildWindows(app.aboutwin,font_child,(LPARAM)app.normal); if(app.modelwin) EnumChildWindows(app.modelwin,font_child,(LPARAM)app.normal);
     SendMessageW(app.explorerhead,WM_SETFONT,(WPARAM)app.heading,TRUE); SendMessageW(app.title,WM_SETFONT,(WPARAM)app.heading,TRUE); SendMessageW(app.monitorhead,WM_SETFONT,(WPARAM)app.heading,TRUE); SendMessageW(app.activitytitle,WM_SETFONT,(WPARAM)app.heading,TRUE);
     if(app.tree) { HIMAGELIST old=app.icons; app.icons=classic_icons(app.dpi); TreeView_SetImageList(app.tree,app.icons,TVSIL_NORMAL); if(app.modelwin) ListView_SetImageList(GetDlgItem(app.modelwin,703),app.icons,LVSIL_SMALL); if(app.serverwin) ListView_SetImageList(GetDlgItem(app.serverwin,510),app.icons,LVSIL_SMALL); if(old) ImageList_Destroy(old); }
-    if(normal) DeleteObject(normal); if(fixed) DeleteObject(fixed); if(heading) DeleteObject(heading); if(brand) DeleteObject(brand); app.view_valid=0; app.activity_chat=NULL;
+    if(normal) DeleteObject(normal); if(fixed) DeleteObject(fixed); if(heading) DeleteObject(heading); if(brand) DeleteObject(brand); if(small) DeleteObject(small); if(app.tree) TreeView_SetItemHeight(app.tree,px(32)); app.view_valid=0; app.activity_chat=NULL;
 }
 static void paint_workbench(HDC dc) {
     HDC buffer=CreateCompatibleDC(dc); HBITMAP bitmap=CreateCompatibleBitmap(dc,app.width>0?app.width:1,app.height>0?app.height:1); HGDIOBJ old;
@@ -998,11 +1165,12 @@ static LRESULT CALLBACK window_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
         app.window=w; app.dpi=(int)GetDpiForWindow(w); app.rich=LoadLibraryW(L"Msftedit.dll");
         update_fonts();
         app.fresh=child(w,L"BUTTON",L"New chat",WS_TABSTOP|BS_OWNERDRAW,IdNew); app.server=child(w,L"BUTTON",L"",WS_TABSTOP|BS_OWNERDRAW,IdServer); app.title=child(w,L"STATIC",L"new chat",SS_ENDELLIPSIS,0); app.model=child(w,L"BUTTON",L"server default",WS_TABSTOP|BS_OWNERDRAW,IdModel); app.search=child(w,L"EDIT",L"",WS_TABSTOP|ES_AUTOHSCROLL,IdSearch); SendMessageW(app.search,EM_SETCUEBANNER,FALSE,(LPARAM)L"search chats");
-        app.tree=child(w,WC_TREEVIEWW,L"",WS_TABSTOP|TVS_NOHSCROLL|TVS_SHOWSELALWAYS|TVS_INFOTIP|TVS_HASBUTTONS|TVS_HASLINES|TVS_LINESATROOT,IdTree); SendMessageW(app.tree,TVM_SETEXTENDEDSTYLE,TVS_EX_DOUBLEBUFFER,TVS_EX_DOUBLEBUFFER); app.icons=classic_icons(app.dpi); TreeView_SetImageList(app.tree,app.icons,TVSIL_NORMAL);
+        app.tree=child(w,WC_TREEVIEWW,L"",WS_TABSTOP|TVS_NOHSCROLL|TVS_SHOWSELALWAYS|TVS_INFOTIP|TVS_HASBUTTONS|TVS_HASLINES|TVS_LINESATROOT,IdTree); SendMessageW(app.tree,TVM_SETEXTENDEDSTYLE,TVS_EX_DOUBLEBUFFER,TVS_EX_DOUBLEBUFFER); TreeView_SetItemHeight(app.tree,px(32)); app.icons=classic_icons(app.dpi); TreeView_SetImageList(app.tree,app.icons,TVSIL_NORMAL);
         app.tooltip=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,NULL,WS_POPUP|TTS_ALWAYSTIP,0,0,0,0,w,NULL,app.instance,NULL); { TOOLINFOW t={0}; t.cbSize=sizeof(t); t.uFlags=TTF_IDISHWND|TTF_SUBCLASS; t.hwnd=w; t.uId=(UINT_PTR)app.server; t.lpszText=L"Switch saved server"; SendMessageW(app.tooltip,TTM_ADDTOOLW,0,(LPARAM)&t); t.uFlags=TTF_SUBCLASS; t.uId=1; t.lpszText=L"Drag to resize the chat list"; SendMessageW(app.tooltip,TTM_ADDTOOLW,0,(LPARAM)&t); }
         app.transcript=child(w,MSFTEDIT_CLASS,L"",WS_TABSTOP|ES_MULTILINE|ES_READONLY|WS_VSCROLL,0); SendMessageW(app.transcript,EM_EXLIMITTEXT,0,WIRE_LIMIT); SetWindowSubclass(app.transcript,transcript_proc,1,0); SendMessageW(app.transcript,EM_SETOPTIONS,ECOOP_OR,ECO_NOHIDESEL);
         app.prompt=child(w,L"EDIT",L"",WS_TABSTOP|ES_MULTILINE|ES_AUTOVSCROLL|WS_VSCROLL,IdPrompt); SendMessageW(app.prompt,EM_SETLIMITTEXT,256*1024,0); SetWindowSubclass(app.prompt,prompt_proc,1,0);
-        app.send=child(w,L"BUTTON",L"send",WS_TABSTOP|BS_OWNERDRAW,IdSend); app.attach=child(w,L"BUTTON",L"attach",WS_TABSTOP|BS_OWNERDRAW,IdAttach); app.request=child(w,L"BUTTON",L"export chat",WS_TABSTOP|BS_OWNERDRAW,IdRequest); app.status=child(w,L"STATIC",L"offline",SS_LEFTNOWORDWRAP,0); app.net=net_new(w);
+        app.tray=child(w,L"LCBHermesAttachments",L"Draft attachments",WS_TABSTOP|WS_HSCROLL,0);
+        app.send=child(w,L"BUTTON",L"send",WS_TABSTOP|BS_OWNERDRAW,IdSend); app.attach=child(w,L"BUTTON",L"attach",WS_TABSTOP|BS_OWNERDRAW,IdAttach); app.request=child(w,L"BUTTON",L"Answer request",WS_TABSTOP|BS_OWNERDRAW,IdRequest); app.status=child(w,L"STATIC",L"offline",SS_LEFTNOWORDWRAP,0); app.net=net_new(w);
         app.explorerhead=child(w,L"STATIC",L"Conversations",SS_ENDELLIPSIS,0); app.monitorhead=child(w,L"STATIC",L"Server monitor",0,0); app.monitor=child(w,L"LCBHermesMonitor",L"",0,0);
         app.activitytitle=child(w,L"STATIC",L"Hermes activity",SS_ENDELLIPSIS,0); app.activityhead=child(w,L"STATIC",L"Ready",SS_ENDELLIPSIS,0); app.activityview=child(w,MSFTEDIT_CLASS,L"",WS_TABSTOP|ES_MULTILINE|ES_READONLY|WS_VSCROLL,0); SendMessageW(app.activityview,EM_SETTARGETDEVICE,0,0); SendMessageW(app.activityview,EM_EXLIMITTEXT,0,32000); app.progress=child(w,PROGRESS_CLASSW,L"",PBS_MARQUEE,0);
         app.workspace=child(w,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST|WS_VSCROLL,IdWorkspace);  app.projectbutton=child(w,L"BUTTON",L"Workspaces...",WS_TABSTOP|BS_OWNERDRAW,IdProjects); app.summary=child(w,L"STATIC",L"",SS_ENDELLIPSIS,0);
@@ -1038,12 +1206,12 @@ static LRESULT CALLBACK window_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
         case IdModel: if(app.connected) models(); else notice("Connect before choosing a model."); break;
         case IdSend: submit(); break;
         case IdAttach: attach(); break;
-        case IdRequest: if(app.current&&cJSON_GetArraySize(app.current->requests)) request_dialog(); else export_chat(); break;
+        case IdRequest: if(app.current&&cJSON_GetArraySize(app.current->requests)) request_dialog(); break;
         case IdPrompt: if(HIWORD(wp)==EN_CHANGE && !app.restoring && app.current) { free(app.current->draft); app.current->draft=gettext(app.prompt); schedule_save(); } break;
         case IdSearch: if(HIWORD(wp)==EN_CHANGE) sidebar(); break;
         case IdReconnect: if(*app.url&&*app.cookie) connect_to(app.url,app.user,"",jb(app.profile,"http"),app.cookie); else show_server(); break;
         case IdRefresh: if(app.connected) { listchats(); rpc("projects.list",params(),RpcProjects,NULL); project_tree(); poll_stats(); } break;
-        case IdRemoveAttachment: if(app.current && !app.current->pending) { cJSON_Delete(app.current->attachments); app.current->attachments=cJSON_CreateArray(); render(); schedule_save(); } break;
+        case IdRemoveAttachment: if(app.current) remove_attachment(app.current,cJSON_GetArraySize(app.current->attachments)-1,1); break;
         case IdDelete:
             if(app.current && !app.current->running && !app.current->pending && !app.uploads && app.connected) {
                 if(MessageBoxW(w,L"Delete this chat on the server? This cannot be undone.",L"delete chat",MB_OKCANCEL|MB_DEFBUTTON2|MB_ICONQUESTION)==IDOK) {
@@ -1057,7 +1225,9 @@ static LRESULT CALLBACK window_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
         return 0;
     case WM_NOTIFY: {
         NMHDR *h=(NMHDR *)lp;
-        if(h->hwndFrom==app.tree && h->code==TVN_SELCHANGEDW && !app.treebusy) { Chat *c=(Chat *)((NMTREEVIEWW *)lp)->itemNew.lParam; if(c&&c!=app.current) { app.current=c; c->unread=0; app.notice[0]=0; if(*c->stored&&!c->loaded) resume(c); render(); sidebar(); schedule_save(); } }
+        if(h->hwndFrom==app.tree&&h->code==NM_CUSTOMDRAW) return tree_paint((NMTVCUSTOMDRAW *)lp);
+        if(h->hwndFrom==app.tree&&h->code==TVN_GETINFOTIPW) { NMTVGETINFOTIPW *tip=(NMTVGETINFOTIPW *)lp; Chat *c=(Chat *)tip->lParam; if(c) { wchar_t date[120],*title=wide(c->title),*source=wide(c->source); chat_date(c,1,date,120); swprintf(tip->pszText,tip->cchTextMax,L"%ls\r\n%ls%ls%ls",title?title:L"",date,*date&&source&&*source?L" / ":L"",source?source:L""); free(title); free(source); } return 0; }
+        if(h->hwndFrom==app.tree && h->code==TVN_SELCHANGEDW && !app.treebusy) { Chat *c=(Chat *)((NMTREEVIEWW *)lp)->itemNew.lParam; if(c&&c!=app.current) { app.current=c; c->unread=c->completed_unread=0; app.notice[0]=0; if(*c->stored&&!c->loaded) resume(c); render(); sidebar(); schedule_save(); } }
         if(h->hwndFrom==app.tree && h->code==TVN_KEYDOWN && ((NMTVKEYDOWN *)lp)->wVKey==VK_DELETE) { TVITEMW item={0}; item.hItem=TreeView_GetSelection(app.tree); item.mask=TVIF_PARAM; if(TreeView_GetItem(app.tree,&item)&&item.lParam) PostMessageW(w,WM_COMMAND,IdDelete,0); }
         return 0;
     }
@@ -1090,13 +1260,15 @@ static int create_window(HINSTANCE instance,int show) {
     wc.lpszClassName=L"LCBHermesServer"; wc.lpfnWndProc=server_proc; RegisterClassExW(&wc); wc.lpszClassName=L"LCBHermesQuestion"; wc.lpfnWndProc=question_proc; RegisterClassExW(&wc); wc.lpszClassName=L"LCBHermesProjects"; wc.lpfnWndProc=project_proc; RegisterClassExW(&wc);
     wc.lpszClassName=L"LCBHermesModels"; wc.lpfnWndProc=model_proc; RegisterClassExW(&wc);
     wc.lpszClassName=L"LCBHermesMonitor"; wc.lpfnWndProc=monitor_proc; RegisterClassExW(&wc);
+    wc.lpszClassName=L"LCBHermesAttachments"; wc.lpfnWndProc=tray_proc; RegisterClassExW(&wc);
     wc.lpszClassName=L"LCBHermesAbout"; wc.lpfnWndProc=about_proc; RegisterClassExW(&wc);
     w=CreateWindowExW(0,L"LCBHermes",L"lcb-hermes",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1180,800,NULL,NULL,instance,NULL); if(!w) return 0; ShowWindow(w,show); UpdateWindow(w); return 1;
 }
 static void cleanup(void) {
-    MSG msg; Pending *p; net_free(app.net); while(PeekMessageW(&msg,app.window,NET_MESSAGE,NET_MESSAGE,PM_REMOVE)) { NetMessage *m=(NetMessage *)msg.lParam; if(m->tag==RestUpload) free(m->context); cJSON_Delete(m->json); free(m); }
+    MSG msg; Pending *p; net_free(app.net); while(PeekMessageW(&msg,app.window,NET_MESSAGE,NET_MESSAGE,PM_REMOVE)) { NetMessage *m=(NetMessage *)msg.lParam; if(m->tag==RestUpload) upload_done(m->context); cJSON_Delete(m->json); free(m); }
+    while(app.upload_jobs) upload_done(app.upload_jobs);
     while((p=app.pending)!=NULL) { app.pending=p->next; free(p); } clear_chats(); previews_clear(); cJSON_Delete(app.settings); cJSON_Delete(app.stats); cJSON_Delete(app.models); cJSON_Delete(app.projects); cJSON_Delete(app.project_tree);
-    free(app.view_rows); free(app.activity_text); if(app.nouslogo) DeleteObject(app.nouslogo); if(app.icons) ImageList_Destroy(app.icons); if(app.normal) DeleteObject(app.normal); if(app.fixed) DeleteObject(app.fixed); if(app.heading) DeleteObject(app.heading); if(app.brandfont) DeleteObject(app.brandfont); if(app.face) DeleteObject(app.face); if(app.paper) DeleteObject(app.paper); if(app.rich) FreeLibrary(app.rich); CoUninitialize();
+    free(app.view_rows); free(app.activity_text); if(app.nouslogo) DeleteObject(app.nouslogo); if(app.icons) ImageList_Destroy(app.icons); if(app.normal) DeleteObject(app.normal); if(app.fixed) DeleteObject(app.fixed); if(app.heading) DeleteObject(app.heading); if(app.brandfont) DeleteObject(app.brandfont); if(app.small) DeleteObject(app.small); if(app.face) DeleteObject(app.face); if(app.paper) DeleteObject(app.paper); if(app.rich) FreeLibrary(app.rich); CoUninitialize();
 }
 static void startup_connection(void) {
     if(*app.url&&*app.cookie) connect_to(app.url,app.user,"",jb(app.profile,"http"),app.cookie);
