@@ -38,18 +38,31 @@ char *row_text(const cJSON *row) {
     if(used) out[used-1]=0;
     return out;
 }
+int chat_matches(const Chat *c,const char *id) { return id&&*id&&(!strcmp(id,c->id)||!strcmp(id,c->stored)||!strcmp(id,c->list_id)||!strcmp(id,c->key)); }
+void chat_listing(Chat *c,const cJSON *row,unsigned long long order) {
+    const char *id=*js(row,"id")?js(row,"id"):js(row,"session_id"),*resolved=js(row,"resolved_id"); const cJSON *started=cJSON_GetObjectItemCaseSensitive(row,"started_at");
+    if(*id) { field(c->list_id,sizeof(c->list_id),id); field(c->stored,sizeof(c->stored),*resolved?resolved:id); }
+    if(*js(row,"title")) field(c->title,sizeof(c->title),js(row,"title"));
+    if(*js(row,"source")) field(c->source,sizeof(c->source),js(row,"source"));
+    if(cJSON_IsNumber(started)&&started->valuedouble>0) c->started_at=started->valuedouble;
+    workspace(c,row); c->listed=1; c->order=order;
+}
 Chat *chat_new(const char *key) {
     Chat *c=calloc(1,sizeof(*c)); if(!c) return NULL;
     field(c->key,sizeof(c->key),key); field(c->title,sizeof(c->title),"new chat");
     c->draft=textdup(""); c->messages=cJSON_CreateArray(); c->requests=cJSON_CreateArray(); c->attachments=cJSON_CreateArray(); c->media=cJSON_CreateObject(); c->stream=-1; c->sequence=-1;
-    c->activity_log=cJSON_CreateArray(); return c;
+    c->listed=1; c->activity_log=cJSON_CreateArray(); return c;
 }
 void chat_free(Chat *c) { if(!c) return; free(c->draft); cJSON_Delete(c->messages); cJSON_Delete(c->requests); cJSON_Delete(c->attachments); cJSON_Delete(c->media); cJSON_Delete(c->activity_log); free(c); }
 void chat_load(Chat *c, const cJSON *r) {
     const cJSON *info=cJSON_GetObjectItemCaseSensitive(r,"info"), *flight=cJSON_GetObjectItemCaseSensitive(r,"inflight");
     const char *stored=js(info,"stored_session_id");
+    if(strcmp(c->id,js(r,"session_id"))) {
+        cJSON *a; c->sequence=-1;
+        cJSON_ArrayForEach(a,c->attachments) cJSON_DeleteItemFromObjectCaseSensitive(a,"queued");
+    }
     field(c->id,sizeof(c->id),js(r,"session_id"));
-    if(!*stored) stored=js(r,"stored_session_id"); if(!*stored && *c->stored) stored=c->stored; if(!*stored) stored=c->id;
+    if(!*stored) stored=js(r,"stored_session_id"); if(!*stored) stored=js(r,"session_key"); if(!*stored && *c->stored) stored=c->stored; if(!*stored) stored=c->id;
     if(stored!=c->stored) field(c->stored,sizeof(c->stored),stored);
     if(*js(info,"title")) field(c->title,sizeof(c->title),js(info,"title"));
     field(c->model,sizeof(c->model),js(info,"model"));
@@ -73,7 +86,7 @@ static cJSON *stream(Chat *c) {
 }
 int chat_event(Chat *c, const cJSON *e) {
     const char *id=js(e,"session_id"), *type=js(e,"type"); const cJSON *p=cJSON_GetObjectItemCaseSensitive(e,"payload"), *seq=cJSON_GetObjectItemCaseSensitive(e,"seq");
-    if(!*id || (strcmp(id,c->id)&&strcmp(id,c->stored))) return 0;
+    if(!chat_matches(c,id)) return 0;
     if(cJSON_IsNumber(seq)) { if(seq->valuedouble<=c->sequence) return 0; c->sequence=seq->valuedouble; }
     if(!strcmp(type,"message.start")) { c->running=1; c->stream=-1; activity(c,"Working"); }
     else if(!strcmp(type,"message.delta")) {
@@ -116,12 +129,16 @@ int chat_event(Chat *c, const cJSON *e) {
     return 1;
 }
 cJSON *chat_json(const Chat *c) {
-    cJSON *o=cJSON_CreateObject(); cJSON_AddStringToObject(o,"model",c->model); cJSON_AddStringToObject(o,"provider",c->provider); cJSON_AddStringToObject(o,"reasoning",c->reasoning); cJSON_AddStringToObject(o,"key",c->key); cJSON_AddStringToObject(o,"stored",c->stored); cJSON_AddStringToObject(o,"title",c->title);
+    cJSON *o=cJSON_CreateObject(); cJSON_AddStringToObject(o,"list_id",c->list_id); cJSON_AddStringToObject(o,"source",c->source); cJSON_AddNumberToObject(o,"started_at",c->started_at); cJSON_AddNumberToObject(o,"order",(double)c->order); cJSON_AddBoolToObject(o,"listed",c->listed); cJSON_AddBoolToObject(o,"completed_unread",c->completed_unread); cJSON_AddStringToObject(o,"model",c->model); cJSON_AddStringToObject(o,"provider",c->provider); cJSON_AddStringToObject(o,"reasoning",c->reasoning); cJSON_AddStringToObject(o,"key",c->key); cJSON_AddStringToObject(o,"stored",c->stored); cJSON_AddStringToObject(o,"title",c->title);
     cJSON_AddStringToObject(o,"cwd",c->cwd); cJSON_AddStringToObject(o,"project_id",c->project_id); cJSON_AddStringToObject(o,"project_name",c->project_name);
     cJSON_AddStringToObject(o,"draft",c->draft); cJSON_AddItemToObject(o,"attachments",cJSON_Duplicate(c->attachments,1)); cJSON_AddItemToObject(o,"media",cJSON_Duplicate(c->media,1)); return o;
 }
 Chat *chat_restore(const cJSON *v) {
-    Chat *c=chat_new(js(v,"key")); if(!c) return NULL;
+    Chat *c=chat_new(js(v,"key")); const cJSON *n; if(!c) return NULL;
+    field(c->list_id,sizeof(c->list_id),js(v,"list_id")); field(c->source,sizeof(c->source),js(v,"source"));
+    n=cJSON_GetObjectItemCaseSensitive(v,"started_at"); if(cJSON_IsNumber(n)) c->started_at=n->valuedouble;
+    n=cJSON_GetObjectItemCaseSensitive(v,"order"); if(cJSON_IsNumber(n)&&n->valuedouble>0) c->order=(unsigned long long)n->valuedouble;
+    c->listed=!cJSON_HasObjectItem(v,"listed")||jb(v,"listed"); c->completed_unread=jb(v,"completed_unread"); c->unread=c->completed_unread;
     field(c->model,sizeof(c->model),js(v,"model")); field(c->provider,sizeof(c->provider),js(v,"provider")); field(c->reasoning,sizeof(c->reasoning),js(v,"reasoning"));
     field(c->stored,sizeof(c->stored),js(v,"stored")); field(c->title,sizeof(c->title),js(v,"title")); free(c->draft); c->draft=textdup(js(v,"draft"));
     field(c->cwd,sizeof(c->cwd),js(v,"cwd")); field(c->project_id,sizeof(c->project_id),js(v,"project_id")); field(c->project_name,sizeof(c->project_name),js(v,"project_name"));

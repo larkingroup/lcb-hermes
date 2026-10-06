@@ -16,7 +16,12 @@ Android 16 emulator. Hermes 0.21.5 on TrueNAS.
 
 0.4.0 PC / Windows x64, Zig 0.16 C compiler; warnings treated as errors.
 
-- Four C suites: protocol/replay, Markdown, endpoints/DPAPI, native chat/menu regressions.
+- Seven local C suites: protocol/replay, Markdown, endpoints/DPAPI, native chat/menu
+  regressions, resize/streaming, model/server controls, and chat lifecycle/attachments.
+- Recent-first session listing, canonical/runtime ID reconciliation, saved dates,
+  completion color/order, attachment tray/removal and uncertain-send draft retention.
+- Read-only 0.21.5 audit: 28 distinct saved sessions and 28 unique local references;
+  repeated numbered titles were distinct server history, with no deletion performed.
 - Live NAS: native login, WebSocket streaming, browser navigation, saved-chat resume, stats.
 - Live desktop controls: empty defaults, image upload/preview/reply, separate background chat,
   server-menu return, image metadata after resume, deletion of its own test chat.

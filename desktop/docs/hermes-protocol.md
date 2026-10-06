@@ -4,6 +4,45 @@ Reviewed against the official Hermes source/docs and the existing 0.21.5 server 
 2026-10-05. The desktop stays on the authenticated JSON-RPC WebSocket contract it
 already uses. The REST session-chat SSE API is a separate surface.
 
+## Session identity and history
+
+`session.list` supplies the human-facing, recent-first list. Its `id` identifies a
+saved conversation; newer servers may also return `resolved_id` for the current
+compression tip. The client retains both IDs. A live `session_id` is a runtime
+handle. Create/resume responses associate it with `stored_session_id`,
+`info.stored_session_id` or `session_key`. These are aliases of one sidebar entry,
+not reasons to create another conversation. Equal titles alone are never merged.
+
+The 0.21.5 listing returns `started_at` and `source`, but omits `last_active`.
+The sidebar uses the server's list order and displays the saved creation time in
+local time, with the full date in its tooltip. It does not substitute a resumed
+runtime's start time for the original chat date. Completion events move that chat
+to the top of its folder and mark an unopened background reply blue.
+
+Client cache references missing from a complete listing are hidden without
+deleting saved drafts or server data. A capped listing cannot establish absence.
+Identity reconciliation retains drafts, media and pending requests. Distinct
+unsent drafts that share a saved ID are preserved as separate local drafts.
+Event sequence watermarks reset when the runtime handle or replay epoch changes.
+
+Numbered titles can be real separate sessions or branch titles. The live audit
+found 28 distinct saved IDs and 28 unique client entries, including Android and
+desktop sessions. None were deleted or combined on the basis of their title.
+
+## Attachments and sending
+
+Authenticated upload returns a server path. Photos and files are staged per chat
+in a native tray above the composer, with filenames, thumbnails and removal.
+The transcript retains compact sent-file references rather than image padding.
+
+`image.attach` queues images for the next turn; `image.detach` removes a path from
+that queue without deleting the uploaded file. Before queuing an unconfirmed
+image, the client detaches the same path in that runtime so reconnects cannot
+silently queue it twice. Removing a queued image waits for the detach response.
+Text and attachments stay in the draft until `prompt.submit` is acknowledged.
+An uncertain send retains them and refreshes the session without retrying the
+prompt. Chat export is a menu action and does not affect server history.
+
 ## Workspaces
 
 `projects.list` reads the server's registered projects and attached folders.
@@ -79,6 +118,9 @@ the live figures. Responses are scoped to their originating server URL.
 - [Model and reasoning scope](https://github.com/NousResearch/hermes-agent/blob/main/tui_gateway/methods_config_set.py)
 - [Reasoning effort vocabulary](https://github.com/NousResearch/hermes-agent/blob/main/agent/reasoning_effort.py)
 - [Session create and resume](https://github.com/NousResearch/hermes-agent/blob/main/tui_gateway/methods_session.py)
+- [Session history and naming](https://hermes-agent.nousresearch.com/docs/user-guide/sessions/)
+- [Session and message contracts](https://github.com/NousResearch/hermes-agent/blob/main/tui_gateway/contracts/common.py)
+- [Prompt and attachment RPCs](https://github.com/NousResearch/hermes-agent/blob/main/tui_gateway/methods_prompt.py)
 - [Gateway reasoning callbacks](https://github.com/NousResearch/hermes-agent/blob/main/tui_gateway/agent_callbacks.py)
 - [TUI activity words](https://github.com/NousResearch/hermes-agent/blob/main/ui-tui/src/content/verbs.ts)
 - [REST/SSE API server](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/api-server.md)
