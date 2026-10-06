@@ -22,7 +22,7 @@
 #include "classic_win.h"
 #include "markdown.h"
 
-enum { IdTree=100,IdPrompt,IdSend,IdNew,IdServer,IdModel,IdSearch,IdAttach,IdRequest,IdExport,IdReconnect,IdRefresh,IdRename,IdDelete,IdForget,IdAbout,IdDraft,IdRemoveAttachment,IdWorkspace,IdProjects,IdMonitor,IdExpand,IdCollapse,IdExit,IdRender=300,IdSave,IdHeartbeat,IdTimeout,IdStats,IdList };
+enum { IdTree=100,IdPrompt,IdSend,IdNew,IdServer,IdModel,IdSearch,IdAttach,IdRequest,IdExport,IdReconnect,IdRefresh,IdRename,IdDelete,IdForget,IdAbout,IdDraft,IdRemoveAttachment,IdWorkspace,IdProjects,IdMonitor,IdExpand,IdCollapse,IdExit,IdWider,IdNarrower,IdRender=300,IdSave,IdHeartbeat,IdTimeout,IdStats,IdList };
 enum { RpcCaps=1,RpcList,RpcResume,RpcCreate,RpcSubmit,RpcStop,RpcModels,RpcAttach,RpcRename,RpcDelete,RpcPing,RpcCloseDelete,RpcResumeSend,RpcProjects,RpcProjectCreate,RpcProjectAdd,RpcDefaultModel,RpcProjectTree };
 enum { RestStats=1,RestUpload };
 typedef struct Pending { int id, kind; Chat *chat; ULONGLONG started; struct Pending *next; } Pending;
@@ -30,9 +30,11 @@ typedef struct Preview { HBITMAP bitmap; LONG anchor; int width,height; } Previe
 typedef struct Upload { Chat *chat; wchar_t path[32768]; } Upload;
 typedef struct TreeRow { Chat *chat; HTREEITEM item,parent; } TreeRow;
 typedef struct TreeGroup { char path[1024]; HTREEITEM item; } TreeGroup;
+typedef struct RenderRow { unsigned long long hash; LONG anchor; int visible; } RenderRow;
 static struct {
     HINSTANCE instance; HWND window,tree,search,prompt,transcript,send,fresh,server,model,title,status,attach,request,serverwin,tooltip;
-    HWND explorerhead,monitorhead,monitor,activityhead,activityview,workspace,workspacelabel,projectbutton,summary,projectwin,progress,aboutwin,hotbutton;
+    HWND explorerhead,monitorhead,monitor,activityhead,activitytitle,activityview,workspace,workspacelabel,projectbutton,summary,projectwin,progress,aboutwin,hotbutton;
+    HDWP positions;
     HFONT normal,fixed,heading,brandfont; HBRUSH face,paper; HIMAGELIST icons; HMODULE rich;
     HBITMAP nouslogo; int logo_width,logo_height;
     int dpi,width,height,connected,connecting,restoring,nextid,treebusy,models_pending,models_open,uploads,corrupt;
@@ -43,12 +45,18 @@ static struct {
     Net *net; cJSON *settings,*profile,*stats,*models,*projects,*project_tree; Pending *pending; Chat **chats,*current; size_t count,capacity;
     TreeRow rows[1000]; size_t nrows; TreeGroup groups[1000]; size_t ngroups;
     Preview previews[128]; int npreviews; char *status_text;
+    Chat *view_chat,*activity_chat; RenderRow *view_rows; size_t view_count,view_capacity; LONG view_tail;
+    unsigned long long view_attachments; int view_valid,paragraph_start,speaker;
+    char *activity_text;
 } app;
 static void render(void), sidebar(void), save(void), controls(void), show_server(void), resume(Chat *c), submit(void), start_send(Chat *c), request_dialog(void), layout(void), project_choices(void), show_projects(void);
 static const cJSON *chosen_project(HWND w);
 static void choose_workspace(const char *path);
 static void show_about(HWND owner);
 static void draw_button(DRAWITEMSTRUCT *d);
+static void activity_render(const char *text);
+static LRESULT CALLBACK monitor_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp);
+static void update_fonts(void);
 static int px(int n) { return MulDiv(n,app.dpi,96); }
 static void copytext(char *dst,size_t cap,const char *src) { snprintf(dst,cap,"%s",src); }
 static void settext(HWND w,const char *s) { wchar_t *v=wide(s); if(v && w) { int n=GetWindowTextLengthW(w); wchar_t *old=calloc((size_t)n+1,sizeof(*old)); if(old) { GetWindowTextW(w,old,n+1); if(wcscmp(old,v)) SetWindowTextW(w,v); free(old); } } free(v); }
@@ -62,7 +70,7 @@ static void freshkey(char out[65]) { GUID id; if(SUCCEEDED(CoCreateGuid(&id))) s
 static int addchat(Chat *c) { if(!c) return 0; if(app.count==app.capacity) { size_t cap=app.capacity?app.capacity*2:16; Chat **next=realloc(app.chats,cap*sizeof(*next)); if(!next) { chat_free(c); return 0; } app.chats=next; app.capacity=cap; } app.chats[app.count++]=c; return 1; }
 static Chat *findchat(const char *id) { size_t i; if(!*id) return NULL; for(i=0;i<app.count;i++) if(!strcmp(id,app.chats[i]->id)||!strcmp(id,app.chats[i]->stored)||!strcmp(id,app.chats[i]->key)) return app.chats[i]; return NULL; }
 static void newchat(void) { char key[65]; Chat *c; freshkey(key); c=chat_new(key); if(!c) return; copytext(c->cwd,sizeof(c->cwd),app.newcwd); if(!addchat(c)) return; app.current=c; app.notice[0]=0; sidebar(); render(); schedule_save(); SetFocus(app.prompt); }
-static void clear_chats(void) { size_t i; app.treebusy=1; TreeView_DeleteAllItems(app.tree); app.nrows=app.ngroups=0; app.treebusy=0; for(i=0;i<app.count;i++) chat_free(app.chats[i]); free(app.chats); app.chats=NULL; app.count=app.capacity=0; app.current=NULL; }
+static void clear_chats(void) { size_t i; app.view_valid=0; app.view_chat=app.activity_chat=NULL; app.treebusy=1; TreeView_DeleteAllItems(app.tree); app.nrows=app.ngroups=0; app.treebusy=0; for(i=0;i<app.count;i++) chat_free(app.chats[i]); free(app.chats); app.chats=NULL; app.count=app.capacity=0; app.current=NULL; }
 static void profile_load(const char *url,const char *user) {
     cJSON *profiles=cJSON_GetObjectItemCaseSensitive(app.settings,"profiles"),*p,*a,*v; const char *active;
     clear_chats(); app.profile=NULL;
@@ -109,11 +117,28 @@ static void status_stats(void) {
     else snprintf(buffer,sizeof(buffer),"HERMES  %s\r\n%s\r\n%s / %s\r\n\r\nHOST RESOURCES\r\nCPU    %.1f%% / %.0f CPUs\r\nRAM    %.1f / %.1f GiB\r\nFree   %.1f GiB\r\nDisk   %.1f / %.1f GiB\r\n\r\nHERMES PROCESS\r\nMemory   %.1f MiB\r\nThreads  %.0f\r\n\r\nSERVER DEFAULT MODEL\r\n%s\r\n\r\nUpdated %llu s ago\r\nFigures describe the server host.",js(s,"hermes_version"),js(s,"hostname"),js(s,"os"),js(s,"arch"),number(s,"cpu_percent"),number(s,"cpu_count"),number(memory,"used")/1073741824.0,number(memory,"total")/1073741824.0,number(memory,"available")/1073741824.0,number(disk,"used")/1073741824.0,number(disk,"total")/1073741824.0,number(process,"rss")/1048576.0,number(process,"num_threads"),*app.default_model?app.default_model:"Supplied by Hermes",(unsigned long long)((GetTickCount64()-app.stats_at)/1000));
     settext(view,buffer); settext(app.monitor,buffer);
 }
+static void activity_render(const char *text) {
+    POINT scroll={0}; CHARRANGE selection={0}; SCROLLINFO info={sizeof(info),SIF_ALL,0,0,0,0,0}; int follow=app.activity_chat!=app.current;
+    CHARFORMAT2W font={0}; PARAFORMAT2 paragraph={0}; wchar_t *value;
+    if(app.activity_chat==app.current&&app.activity_text&&!strcmp(app.activity_text,text)) return;
+    if(!app.activityview) return; value=wide(text); if(!value) return;
+    SendMessageW(app.activityview,EM_GETSCROLLPOS,0,(LPARAM)&scroll); SendMessageW(app.activityview,EM_EXGETSEL,0,(LPARAM)&selection);
+    if(!GetScrollInfo(app.activityview,SB_VERT,&info)||info.nPos+(int)info.nPage>=info.nMax-4) follow=1;
+    if(app.activity_chat==app.current&&selection.cpMin!=selection.cpMax) follow=0;
+    SendMessageW(app.activityview,WM_SETREDRAW,FALSE,0); SetWindowTextW(app.activityview,value); free(value);
+    SendMessageW(app.activityview,EM_SETBKGNDCOLOR,0,app.fg); SendMessageW(app.activityview,EM_SETSEL,0,-1);
+    font.cbSize=sizeof(font); font.dwMask=CFM_FACE|CFM_SIZE|CFM_COLOR; font.yHeight=180; font.crTextColor=app.ink; wcscpy(font.szFaceName,L"Tahoma"); SendMessageW(app.activityview,EM_SETCHARFORMAT,SCF_ALL,(LPARAM)&font);
+    paragraph.cbSize=sizeof(paragraph); paragraph.dwMask=PFM_STARTINDENT|PFM_OFFSET|PFM_SPACEAFTER|PFM_LINESPACING; paragraph.dxOffset=180; paragraph.dySpaceAfter=100; paragraph.bLineSpacingRule=0; SendMessageW(app.activityview,EM_SETPARAFORMAT,0,(LPARAM)&paragraph);
+    if(follow) { SendMessageW(app.activityview,EM_SETSEL,-1,-1); SendMessageW(app.activityview,EM_SCROLLCARET,0,0); }
+    else { SendMessageW(app.activityview,EM_EXSETSEL,0,(LPARAM)&selection); SendMessageW(app.activityview,EM_SETSCROLLPOS,0,(LPARAM)&scroll); }
+    SendMessageW(app.activityview,WM_SETREDRAW,TRUE,0); InvalidateRect(app.activityview,NULL,FALSE);
+    free(app.activity_text); app.activity_text=textdup(text); app.activity_chat=app.current;
+}
 static void controls(void) {
     Chat *c=app.current; char line[1200],label[256],log[22000]; size_t used=0,i,working=0; const cJSON *entry; int ready=app.connected&&c&&!c->pending&&!app.uploads;
-    EnableWindow(app.send,ready); EnableWindow(app.attach,ready&&c&&!c->running); SetWindowTextW(app.send,c&&c->running?L"stop":L"send");
+    EnableWindow(app.send,ready); EnableWindow(app.attach,ready&&c&&!c->running); settext(app.send,c&&c->running?"stop":"send");
     snprintf(line,sizeof(line),"%s  |  %s",app.connecting?"Connecting":app.connected?"Connected":"Offline",*app.notice?app.notice:c&&*c->activity?c->activity:"Ready");
-    settext(app.status,line); SetWindowTextW(app.request,c&&cJSON_GetArraySize(c->requests)?L"answer request":L"export chat");
+    settext(app.status,line); settext(app.request,c&&cJSON_GetArraySize(c->requests)?"answer request":"export chat");
     if(c&&*c->model) copytext(label,sizeof(label),c->model); else if(*app.newmodel) copytext(label,sizeof(label),app.newmodel); else snprintf(label,sizeof(label),"Server default%s%s",*app.default_model?": ":"",app.default_model); settext(app.model,label);
     settext(app.title,c?c->title:"new chat");
     snprintf(line,sizeof(line),"Workspace: %s",c&&*c->cwd?c->cwd:"Server default folder"); settext(app.workspacelabel,line);
@@ -121,8 +146,8 @@ static void controls(void) {
     snprintf(line,sizeof(line),"%zu chats  |  %zu working",app.count,working); settext(app.summary,line);
     if(c && c->running) snprintf(line,sizeof(line),"%s...",*c->activity?c->activity:"Working"); else snprintf(line,sizeof(line),"%s",c&&*c->activity?c->activity:"Ready");
     settext(app.activityhead,line); ShowWindow(app.progress,app.monitor_visible&&c&&c->running?SW_SHOW:SW_HIDE); SendMessageW(app.progress,PBM_SETMARQUEE,c&&c->running,80);
-    log[0]=0; if(c) cJSON_ArrayForEach(entry,c->activity_log) if(cJSON_IsString(entry) && used+strlen(entry->valuestring)+3<sizeof(log)) { int n=snprintf(log+used,sizeof(log)-used,"%s\r\n",entry->valuestring); if(n>0) used+=(size_t)n; }
-    if(!used) copytext(log,sizeof(log),"Live activity from Hermes appears here.\r\n\r\nThinking, tools and progress follow the selected chat."); settext(app.activityview,log);
+    log[0]=0; if(c) cJSON_ArrayForEach(entry,c->activity_log) if(cJSON_IsString(entry) && used+strlen(entry->valuestring)+7<sizeof(log)) { int n=snprintf(log+used,sizeof(log)-used,"\xe2\x80\xa2 %s\r\n",entry->valuestring); if(n>0) used+=(size_t)n; }
+    if(!used) copytext(log,sizeof(log),"Tools, thinking and progress from this chat will appear here."); activity_render(log);
     EnableWindow(app.projectbutton,app.connected&&app.projects_supported); EnableWindow(app.workspace,app.connected&&app.projects_supported);
     if(app.serverwin) { snprintf(line,sizeof(line),"%s%s%s",app.connecting?"Connecting":app.connected?"Connected":"Offline",*app.notice?" / ":"",app.notice); settext(GetDlgItem(app.serverwin,508),line); EnableWindow(GetDlgItem(app.serverwin,505),!app.connecting); }
 }
@@ -168,11 +193,19 @@ static void sidebar(void) {
     SendMessageW(app.tree,WM_SETREDRAW,TRUE,0); InvalidateRect(app.tree,NULL,FALSE); app.treebusy=0; free(query);
 }
 static void setformat(unsigned style) {
-    CHARFORMAT2W f={0}; f.cbSize=sizeof(f); f.dwMask=CFM_COLOR|CFM_FACE|CFM_BOLD|CFM_ITALIC|CFM_SIZE|CFM_BACKCOLOR; f.crTextColor=(style&MdQuote)?app.muted:app.ink; f.crBackColor=app.fg; f.yHeight=(style&MdHeading)?260:200;
+    CHARFORMAT2W f={0}; f.cbSize=sizeof(f); f.dwMask=CFM_COLOR|CFM_FACE|CFM_BOLD|CFM_ITALIC|CFM_SIZE|CFM_BACKCOLOR; f.crTextColor=(style&MdQuote)?app.muted:app.ink; f.crBackColor=app.fg; f.yHeight=app.speaker?180:(style&MdHeading)?240:200;
     if(style&(MdBold|MdHeading)) f.dwEffects|=CFE_BOLD; if(style&MdItalic) f.dwEffects|=CFE_ITALIC;
-    wcscpy(f.szFaceName,style&MdCode?L"Consolas":L"Segoe UI"); SendMessageW(app.transcript,EM_SETCHARFORMAT,SCF_SELECTION,(LPARAM)&f);
+    wcscpy(f.szFaceName,style&MdCode?L"Consolas":L"Tahoma"); SendMessageW(app.transcript,EM_SETCHARFORMAT,SCF_SELECTION,(LPARAM)&f);
 }
-static void emit_markdown(void *ctx,const wchar_t *text,unsigned style) { (void)ctx; setformat(style); SendMessageW(app.transcript,EM_REPLACESEL,FALSE,(LPARAM)text); }
+static void emit_markdown(void *ctx,const wchar_t *text,unsigned style) {
+    const wchar_t *p=text; (void)ctx;
+    while(*p) {
+        const wchar_t *end=wcschr(p,L'\n'); size_t n=end?(size_t)(end-p)+1:wcslen(p); wchar_t *part=calloc(n+1,sizeof(*part));
+        if(!part) return; memcpy(part,p,n*sizeof(*part));
+        if(app.paragraph_start) { PARAFORMAT2 f={0}; f.cbSize=sizeof(f); f.dwMask=PFM_STARTINDENT|PFM_OFFSET|PFM_SPACEBEFORE|PFM_SPACEAFTER|PFM_LINESPACING; f.dySpaceBefore=app.speaker?120:0; f.dySpaceAfter=app.speaker?45:35; f.bLineSpacingRule=0; SendMessageW(app.transcript,EM_SETPARAFORMAT,0,(LPARAM)&f); }
+        setformat(style); SendMessageW(app.transcript,EM_REPLACESEL,FALSE,(LPARAM)part); app.paragraph_start=end!=NULL; free(part); p+=n;
+    }
+}
 static void append(const wchar_t *text,unsigned style) { emit_markdown(NULL,text,style); }
 static HBITMAP image_bitmap(const wchar_t *path,int *outw,int *outh) {
     IWICImagingFactory *factory=NULL; IWICBitmapDecoder *decoder=NULL; IWICBitmapFrameDecode *frame=NULL; IWICFormatConverter *converter=NULL; IWICBitmapScaler *scaler=NULL; UINT w=0,h=0; HBITMAP bitmap=NULL; BITMAPINFO info={0}; void *pixels; HDC dc;
@@ -189,10 +222,14 @@ done:
 }
 static LRESULT CALLBACK transcript_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR ref) {
     LRESULT result=DefSubclassProc(w,msg,wp,lp); int i; (void)id;(void)ref;
-    if(msg==WM_PAINT) { HDC dc=GetDC(w); RECT client; GetClientRect(w,&client);
+    if(msg==WM_PAINT||msg==WM_PRINTCLIENT) { HDC dc=msg==WM_PAINT?GetDC(w):(HDC)wp; RECT client; int saved=SaveDC(dc); HPEN pen=CreatePen(PS_SOLID,1,RGB(211,214,195)); HGDIOBJ old=SelectObject(dc,pen); size_t row; GetClientRect(w,&client); IntersectClipRect(dc,0,0,client.right,client.bottom);
+        for(row=0;row<app.view_count;row++) if(app.view_rows[row].visible) { POINTL pos={0}; SendMessageW(w,EM_POSFROMCHAR,(WPARAM)&pos,app.view_rows[row].anchor);
+            if(pos.y>=0&&pos.y<client.bottom&&pos.x+px(64)<client.right-px(12)) { MoveToEx(dc,pos.x+px(64),pos.y+px(16),NULL); LineTo(dc,client.right-px(12),pos.y+px(16)); }
+        }
+        SelectObject(dc,old); DeleteObject(pen);
         for(i=0;i<app.npreviews;i++) { Preview *p=&app.previews[i]; POINTL pos={0}; SendMessageW(w,EM_POSFROMCHAR,(WPARAM)&pos,p->anchor);
             if(pos.y>=-px(150)&&pos.y<client.bottom) { HDC source=CreateCompatibleDC(dc); HGDIOBJ old=SelectObject(source,p->bitmap); SetStretchBltMode(dc,HALFTONE); StretchBlt(dc,pos.x,pos.y,px(p->width),px(p->height),source,0,0,p->width,p->height,SRCCOPY); SelectObject(source,old); DeleteDC(source); }
-        } ReleaseDC(w,dc);
+        } RestoreDC(dc,saved); if(msg==WM_PAINT) ReleaseDC(w,dc);
     }
     return result;
 }
@@ -205,25 +242,55 @@ static void show_attachments(const cJSON *array) {
         if(name) { append(name,MdQuote); append(L"\r\n",0); } free(name); free(local);
     }
 }
+static unsigned long long json_hash(const cJSON *value) {
+    char *text=cJSON_PrintUnformatted(value); const unsigned char *p=(const unsigned char *)text; unsigned long long hash=14695981039346656037ULL;
+    if(p) while(*p) { hash^=*p++; hash*=1099511628211ULL; } free(text); return hash;
+}
+static LONG transcript_end(void) { CHARRANGE range={0}; SendMessageW(app.transcript,EM_SETSEL,-1,-1); SendMessageW(app.transcript,EM_EXGETSEL,0,(LPARAM)&range); return range.cpMax; }
 static void render(void) {
-    const cJSON *row; Chat *c=app.current; POINT scroll={0}; CHARRANGE selected={0}; BOOL atbottom=TRUE; SCROLLINFO info={sizeof(info),SIF_ALL,0,0,0,0,0}; wchar_t *draft;
-    KillTimer(app.window,IdRender); app.render_pending=0; SendMessageW(app.transcript,EM_GETSCROLLPOS,0,(LPARAM)&scroll); SendMessageW(app.transcript,EM_EXGETSEL,0,(LPARAM)&selected);
-    if(GetScrollInfo(app.transcript,SB_VERT,&info)) atbottom=info.nPos+(int)info.nPage>=info.nMax-4;
-    previews_clear(); SendMessageW(app.transcript,WM_SETREDRAW,FALSE,0); SetWindowTextW(app.transcript,L"");
-    SendMessageW(app.transcript,EM_SETBKGNDCOLOR,0,app.fg);
-    if(!c || !cJSON_GetArraySize(c->messages)) {
-        append(L"lcb-hermes\r\n",MdHeading); append(app.connected?L"A fresh conversation.\r\n":L"Connect to your Hermes server to begin.\r\n",MdQuote);
-    } else cJSON_ArrayForEach(row,c->messages) {
-        char *text=row_text(row); wchar_t *w=wide(text?text:""); const char *role=js(row,"role");
-        if(strcmp(role,"user")&&strcmp(role,"assistant")&&strcmp(role,"system")) { free(text); free(w); continue; }
-        append(!strcmp(role,"user")?L"you\r\n":!strcmp(role,"assistant")?L"hermes\r\n":L"system\r\n",MdBold|MdQuote);
-        show_attachments(cJSON_GetObjectItemCaseSensitive(row,"attachments")); if(w) markdown_render(w,emit_markdown,NULL); append(L"\r\n\r\n",0); free(text); free(w);
+    const cJSON *row; Chat *c=app.current; POINT scroll={0}; CHARRANGE selected={0}; BOOL atbottom=TRUE;
+    SCROLLINFO info={sizeof(info),SIF_ALL,0,0,0,0,0}; wchar_t *draft; size_t n=c?(size_t)cJSON_GetArraySize(c->messages):0,i=0,first=0;
+    unsigned long long attachments=json_hash(c?c->attachments:NULL),*hashes=n?calloc(n,sizeof(*hashes)):NULL;
+    int full=!app.view_valid||app.view_chat!=c||!app.view_count||!n; LONG anchor=0;
+    KillTimer(app.window,IdRender); app.render_pending=0; if(n&&!hashes) return;
+    cJSON_ArrayForEach(row,(c?c->messages:NULL)) hashes[i++]=json_hash(row);
+    if(!full) { while(first<n&&first<app.view_count&&app.view_rows[first].hash==hashes[first]) first++;
+        if(first==n&&first==app.view_count&&attachments==app.view_attachments) goto unchanged;
+        anchor=first<app.view_count?app.view_rows[first].anchor:app.view_tail;
     }
-    if(c && cJSON_GetArraySize(c->attachments)) { append(L"attached for your next message\r\n",MdQuote); show_attachments(c->attachments); }
-    SendMessageW(app.transcript,WM_SETREDRAW,TRUE,0);
-    if(atbottom) { SendMessageW(app.transcript,EM_SETSEL,(WPARAM)-1,(LPARAM)-1); SendMessageW(app.transcript,EM_SCROLLCARET,0,0); }
+    if(n>app.view_capacity) { RenderRow *rows=realloc(app.view_rows,n*sizeof(*rows)); if(!rows) { free(hashes); return; } app.view_rows=rows; app.view_capacity=n; }
+    SendMessageW(app.transcript,EM_GETSCROLLPOS,0,(LPARAM)&scroll); SendMessageW(app.transcript,EM_EXGETSEL,0,(LPARAM)&selected);
+    if(app.view_chat==c&&GetScrollInfo(app.transcript,SB_VERT,&info)) atbottom=info.nPos+(int)info.nPage>=info.nMax-4;
+    if(app.view_chat==c&&selected.cpMin!=selected.cpMax) atbottom=FALSE;
+    SendMessageW(app.transcript,WM_SETREDRAW,FALSE,0);
+    if(full) { previews_clear(); SetWindowTextW(app.transcript,L""); first=0; }
+    else { int j; CHARRANGE tail={anchor,-1}; SendMessageW(app.transcript,EM_EXSETSEL,0,(LPARAM)&tail); SendMessageW(app.transcript,EM_REPLACESEL,FALSE,(LPARAM)L"");
+        for(j=0;j<app.npreviews;) if(app.previews[j].anchor>=anchor) { DeleteObject(app.previews[j].bitmap); memmove(app.previews+j,app.previews+j+1,(size_t)(app.npreviews-j-1)*sizeof(*app.previews)); app.npreviews--; } else j++;
+    }
+    SendMessageW(app.transcript,EM_SETBKGNDCOLOR,0,app.fg); transcript_end(); app.paragraph_start=1; app.speaker=0;
+    i=0; cJSON_ArrayForEach(row,(c?c->messages:NULL)) {
+        char *text; wchar_t *w; const char *role; const cJSON *media; size_t length;
+        if(i<first) { i++; continue; }
+        app.view_rows[i]=(RenderRow){hashes[i],transcript_end(),0}; i++;
+        role=js(row,"role"); if(strcmp(role,"user")&&strcmp(role,"assistant")&&strcmp(role,"system")) continue;
+        text=row_text(row); if(!text) continue; length=strlen(text);
+        while(length&&(text[length-1]=='\r'||text[length-1]=='\n'||text[length-1]==' '||text[length-1]=='\t')) text[--length]=0;
+        media=cJSON_GetObjectItemCaseSensitive(row,"attachments");
+        if(!length&&!cJSON_GetArraySize(media)) { free(text); continue; }
+        app.view_rows[i-1].visible=1;
+        app.speaker=1; append(!strcmp(role,"user")?L"You\r\n":!strcmp(role,"assistant")?L"Hermes\r\n":L"System\r\n",MdBold|MdQuote); app.speaker=0;
+        show_attachments(media); w=wide(text); if(w) markdown_render(w,emit_markdown,NULL); if(!app.paragraph_start) append(L"\r\n",0); free(text); free(w);
+    }
+    if(!GetWindowTextLengthW(app.transcript)) { append(L"lcb-hermes\r\n",MdHeading); append(app.connected?L"A fresh conversation.\r\n":L"Connect to your Hermes server to begin.\r\n",MdQuote); }
+    app.view_tail=transcript_end();
+    if(c&&cJSON_GetArraySize(c->attachments)) { append(L"Attached for your next message\r\n",MdQuote); show_attachments(c->attachments); }
+    if(atbottom) { SendMessageW(app.transcript,EM_SETSEL,-1,-1); SendMessageW(app.transcript,EM_SCROLLCARET,0,0); }
     else { SendMessageW(app.transcript,EM_EXSETSEL,0,(LPARAM)&selected); SendMessageW(app.transcript,EM_SETSCROLLPOS,0,(LPARAM)&scroll); }
-    InvalidateRect(app.transcript,NULL,TRUE); app.restoring=1; draft=wide(c?c->draft:""); if(draft) { char *old=gettext(app.prompt); if(strcmp(old,c?c->draft:"")) SetWindowTextW(app.prompt,draft); free(old); free(draft); } app.restoring=0; controls();
+    SendMessageW(app.transcript,WM_SETREDRAW,TRUE,0); InvalidateRect(app.transcript,NULL,FALSE);
+    app.view_chat=c; app.view_count=n; app.view_attachments=attachments; app.view_valid=1;
+unchanged:
+    free(hashes); app.restoring=1; draft=wide(c?c->draft:"");
+    if(draft) { char *old=gettext(app.prompt); if(strcmp(old,c?c->draft:"")) SetWindowTextW(app.prompt,draft); free(old); free(draft); } app.restoring=0; controls();
 }
 static void send_prompt(Chat *c) {
     cJSON *p=sessionparams(c),*row=cJSON_CreateObject(); char *wire=textdup(*c->draft?c->draft:"Please look at the attachment."); const cJSON *a;
@@ -300,7 +367,7 @@ static void result(Pending *wait,const cJSON *r,const char *error) {
     case RpcDefaultModel: copytext(app.default_model,sizeof(app.default_model),*js(r,"model")?js(r,"model"):js(r,"value")); status_stats(); break;
     case RpcRename: if(c) { copytext(c->title,sizeof(c->title),js(r,"title")); listchats(); schedule_save(); } break;
     case RpcCloseDelete: if(c) { cJSON *p=params(); c->id[0]=0; cJSON_AddStringToObject(p,"session_id",c->stored); rpc("session.delete",p,RpcDelete,c); } break;
-    case RpcDelete: if(c) { size_t i; Pending **link=&app.pending; while(*link) { Pending *p=*link; if(p->chat==c) { *link=p->next; free(p); } else link=&p->next; } for(i=0;i<app.count;i++) if(app.chats[i]==c) { memmove(app.chats+i,app.chats+i+1,(app.count-i-1)*sizeof(*app.chats)); app.count--; break; } if(app.current==c) app.current=app.count?app.chats[0]:NULL; chat_free(c); if(!app.current) newchat(); else { if(*app.current->stored) resume(app.current); render(); sidebar(); } save(); } break;
+    case RpcDelete: if(c) { size_t i; Pending **link=&app.pending; while(*link) { Pending *p=*link; if(p->chat==c) { *link=p->next; free(p); } else link=&p->next; } for(i=0;i<app.count;i++) if(app.chats[i]==c) { memmove(app.chats+i,app.chats+i+1,(app.count-i-1)*sizeof(*app.chats)); app.count--; break; } if(app.current==c) app.current=app.count?app.chats[0]:NULL; if(app.view_chat==c) app.view_valid=0; if(app.activity_chat==c) app.activity_chat=NULL; chat_free(c); if(!app.current) newchat(); else { if(*app.current->stored) resume(app.current); render(); sidebar(); } save(); } break;
     default: break;
     } controls();
 }
@@ -366,37 +433,47 @@ static void draw_button(DRAWITEMSTRUCT *d) {
     if((d->itemState&ODS_FOCUS)&&!(d->itemState&ODS_NOFOCUSRECT)) { InflateRect(&t,-px(4),-px(4)); DrawFocusRect(d->hDC,&t); } SelectObject(d->hDC,old);
 }
 static HWND child(HWND owner,const wchar_t *class,const wchar_t *text,DWORD style,int id) {
-    HWND w=CreateWindowExW((!wcscmp(class,L"EDIT")||!wcscmp(class,WC_TREEVIEWW)||!wcscmp(class,MSFTEDIT_CLASS))?WS_EX_CLIENTEDGE:0,class,text,WS_CHILD|WS_VISIBLE|style,0,0,0,0,owner,(HMENU)(INT_PTR)id,app.instance,NULL);
+    HWND w=CreateWindowExW((!wcscmp(class,L"EDIT")||!wcscmp(class,WC_TREEVIEWW)||!wcscmp(class,MSFTEDIT_CLASS)||!wcscmp(class,L"LCBHermesMonitor"))?WS_EX_CLIENTEDGE:0,class,text,WS_CHILD|WS_VISIBLE|style,0,0,0,0,owner,(HMENU)(INT_PTR)id,app.instance,NULL);
     SetWindowTheme(w,L"",L""); SendMessageW(w,WM_SETFONT,(WPARAM)app.normal,TRUE);
     if(!wcscmp(class,L"BUTTON")&&(style&BS_TYPEMASK)==BS_OWNERDRAW) SetWindowSubclass(w,button_proc,1,0); return w;
 }
-static void move(HWND w,int x,int y,int width,int height) { MoveWindow(w,px(x),px(y),px(width),px(height),TRUE); }
+static void move(HWND w,int x,int y,int width,int height) {
+    if(app.positions&&GetParent(w)==app.window) app.positions=DeferWindowPos(app.positions,w,NULL,px(x),px(y),px(width),px(height),SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS);
+    else SetWindowPos(w,NULL,px(x),px(y),px(width),px(height),SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS);
+}
+static void visible(HWND w,int show) { if(((GetWindowLongPtrW(w,GWL_STYLE)&WS_VISIBLE)!=0)!=show) ShowWindow(w,show?SW_SHOW:SW_HIDE); }
+static void inset_text(HWND w,int margin) { RECT r; GetClientRect(w,&r); InflateRect(&r,-px(margin),-px(margin)); if(r.right>r.left&&r.bottom>r.top) SendMessageW(w,EM_SETRECT,0,(LPARAM)&r); }
 static void layout(void) {
-    int w=MulDiv(app.width,96,app.dpi),h=MulDiv(app.height,96,app.dpi),left=app.sidebar_width,end=w-10,statsheight; RECT box;
-    app.monitor_visible=app.show_monitor&&w>=900&&h>=540; if(app.monitor_visible) end=w-274;
-    if(left>end-340) left=end-340; if(left<160) left=160; app.split_x=left; app.monitor_x=end+12;
+    int w=MulDiv(app.width,96,app.dpi),h=MulDiv(app.height,96,app.dpi),left=app.sidebar_width,end=w-10,statsheight; TOOLINFOW tip={0};
+    if(left<180) left=180; if(left>w-370) left=w-370;
+    app.monitor_visible=app.show_monitor&&w-left>=660&&h>=560; if(app.monitor_visible) end=w-274;
+    if(left>end-360) left=end-360; if(left<160) left=160; app.split_x=left; app.monitor_x=end+12;
+    app.positions=BeginDeferWindowPos(24);
     move(app.fresh,10,10,104,28); move(app.projectbutton,122,10,122,28); move(app.server,w-44,10,34,28); move(app.model,w-328,10,274,28);
     move(app.explorerhead,10,53,left-20,23); move(app.search,10,83,left-20,25); move(app.tree,10,116,left-20,h-245);
     move(app.workspace,10,h-94,left-20,200); move(app.summary,10,h-59,left-20,24);
     move(app.title,left+12,53,end-left-24,24); move(app.workspacelabel,left+12,82,end-left-24,22); move(app.transcript,left+12,110,end-left-24,h-294);
     move(app.prompt,left+12,h-151,end-left-120,88); move(app.send,end-96,h-151,84,28); move(app.attach,end-96,h-115,84,26);
     move(app.request,left+12,h-54,142,25); move(app.status,10,h-25,w-20,20);
-    statsheight=h/2-45; if(statsheight>320) statsheight=320;
+    statsheight=(h-190)/2; if(statsheight>342) statsheight=342; if(statsheight<240) statsheight=240;
     move(app.monitorhead,end+12,53,250,23); move(app.monitor,end+12,83,250,statsheight);
-    move(app.activityhead,end+12,statsheight+95,250,25); move(app.progress,end+12,statsheight+127,250,12); move(app.activityview,end+12,statsheight+151,250,h-statsheight-186);
-    ShowWindow(app.monitorhead,app.monitor_visible?SW_SHOW:SW_HIDE); ShowWindow(app.monitor,app.monitor_visible?SW_SHOW:SW_HIDE); ShowWindow(app.activityhead,app.monitor_visible?SW_SHOW:SW_HIDE); ShowWindow(app.activityview,app.monitor_visible?SW_SHOW:SW_HIDE); ShowWindow(app.progress,app.monitor_visible&&app.current&&app.current->running?SW_SHOW:SW_HIDE);
-    box.left=px(12); box.top=px(10); box.right=px(end-left-48); box.bottom=px(h-310); SendMessageW(app.transcript,EM_SETRECT,0,(LPARAM)&box);
-    InvalidateRect(app.window,NULL,FALSE);
+    move(app.activitytitle,end+12,statsheight+98,250,23); move(app.activityhead,end+16,statsheight+128,242,20);
+    move(app.progress,end+16,statsheight+152,242,8); move(app.activityview,end+12,statsheight+168,250,h-statsheight-203);
+    if(app.positions) EndDeferWindowPos(app.positions); app.positions=NULL;
+    visible(app.monitorhead,app.monitor_visible); visible(app.monitor,app.monitor_visible); visible(app.activitytitle,app.monitor_visible); visible(app.activityhead,app.monitor_visible); visible(app.activityview,app.monitor_visible); visible(app.progress,app.monitor_visible&&app.current&&app.current->running);
+    inset_text(app.transcript,12); inset_text(app.activityview,8);
+    tip.cbSize=sizeof(tip); tip.hwnd=app.window; tip.uId=1; tip.rect=(RECT){px(left-6),px(50),px(left+6),px(h-30)}; SendMessageW(app.tooltip,TTM_NEWTOOLRECTW,0,(LPARAM)&tip);
+    RedrawWindow(app.window,NULL,NULL,RDW_INVALIDATE|RDW_ERASE|RDW_ALLCHILDREN);
 }
 static void theme(void) {
-    BOOL dark=FALSE; app.bg=RGB(222,218,199); app.fg=RGB(255,253,238); app.ink=RGB(43,48,42); app.muted=RGB(94,99,80); app.accent=RGB(192,203,179);
+    BOOL dark=FALSE; app.view_valid=0; app.bg=RGB(222,218,199); app.fg=RGB(255,253,238); app.ink=RGB(43,48,42); app.muted=RGB(94,99,80); app.accent=RGB(192,203,179);
     if(app.face) DeleteObject(app.face); if(app.paper) DeleteObject(app.paper); app.face=CreateSolidBrush(app.bg); app.paper=CreateSolidBrush(app.fg);
     TreeView_SetBkColor(app.tree,app.fg); TreeView_SetTextColor(app.tree,app.ink); DwmSetWindowAttribute(app.window,20,&dark,sizeof(dark));
     if(app.serverwin) DwmSetWindowAttribute(app.serverwin,20,&dark,sizeof(dark)); render(); InvalidateRect(app.window,NULL,TRUE); if(app.serverwin) InvalidateRect(app.serverwin,NULL,TRUE);
 }
 static LRESULT color_control(UINT msg,WPARAM wp,LPARAM lp) {
     HDC dc=(HDC)wp; HWND w=(HWND)lp; COLORREF background=(msg==WM_CTLCOLOREDIT||w==app.transcript||w==app.monitor||w==app.activityview||msg==WM_CTLCOLORLISTBOX)?app.fg:app.bg;
-    if(w==app.explorerhead||w==app.title||w==app.monitorhead) background=app.accent;
+    if(w==app.explorerhead||w==app.title||w==app.monitorhead||w==app.activitytitle) background=app.accent;
     SetTextColor(dc,app.ink); SetBkColor(dc,background); SetDCBrushColor(dc,background); return (LRESULT)GetStockObject(DC_BRUSH);
 }
 static HBITMAP resource_bitmap(int id,int *width,int *height) {
@@ -416,6 +493,52 @@ done:
 }
 static void about_text(HDC dc,int x,int y,int width,int height,const wchar_t *text,HFONT font,COLORREF ink) {
     RECT r={px(x),px(y),px(x+width),px(y+height)}; HGDIOBJ old=SelectObject(dc,font); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,ink); DrawTextW(dc,text,-1,&r,DT_LEFT|DT_WORDBREAK|DT_NOPREFIX); SelectObject(dc,old);
+}
+static void panel_text(HDC dc,int x,int y,int width,const char *text,HFONT font,COLORREF ink) {
+    wchar_t *value=wide(text); RECT r={px(x),px(y),px(x+width),px(y+18)}; HGDIOBJ old=SelectObject(dc,font);
+    SetBkMode(dc,TRANSPARENT); SetTextColor(dc,ink); if(value) DrawTextW(dc,value,-1,&r,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX); free(value); SelectObject(dc,old);
+}
+static void resource_meter(HDC dc,int y,int width,int icon,const char *label,double used,double total,const char *detail,int compact) {
+    char percent[40]; RECT r={px(30),px(y+21),px(width-10),px(y+29)},inside; double ratio=total>0?used/total:0;
+    if(ratio<0) ratio=0; if(ratio>1) ratio=1;
+    if(app.icons) ImageList_Draw(app.icons,icon,dc,px(9),px(y),ILD_TRANSPARENT);
+    panel_text(dc,30,y,width-102,label,app.heading,app.ink);
+    if(total>0) snprintf(percent,sizeof(percent),"%.1f%%",used/total*100.0); else copytext(percent,sizeof(percent),"--"); panel_text(dc,width-65,y,55,percent,app.normal,app.muted);
+    SetDCBrushColor(dc,app.bg); FillRect(dc,&r,(HBRUSH)GetStockObject(DC_BRUSH)); classic_edge(dc,r,0); inside=r; InflateRect(&inside,-2,-2); inside.right=inside.left+(LONG)((inside.right-inside.left)*ratio);
+    SetDCBrushColor(dc,ratio>.9?RGB(174,148,101):RGB(137,160,113)); if(inside.right>inside.left) FillRect(dc,&inside,(HBRUSH)GetStockObject(DC_BRUSH));
+    if(!compact) panel_text(dc,30,y+32,width-40,detail,app.normal,app.muted);
+}
+static void draw_monitor(HWND w,HDC dc) {
+    RECT r; int width,height,compact,step,start,model_y; char text[512],detail[128];
+    const cJSON *s=app.stats,*memory=cJSON_GetObjectItemCaseSensitive(s,"memory"),*disk=cJSON_GetObjectItemCaseSensitive(s,"disk"),*process=cJSON_GetObjectItemCaseSensitive(s,"process");
+    GetClientRect(w,&r); FillRect(dc,&r,app.paper); width=MulDiv(r.right,96,app.dpi); height=MulDiv(r.bottom,96,app.dpi); compact=height<285; step=compact?43:55; start=compact?57:70;
+    if(app.icons) ImageList_Draw(app.icons,ClassicOutput,dc,px(9),px(10),ILD_TRANSPARENT);
+    snprintf(text,sizeof(text),"Hermes%s%s",app.connected&&s?" ":"",app.connected&&s?js(s,"hermes_version"):""); panel_text(dc,32,10,width-42,text,app.heading,app.ink);
+    if(!app.connected||!s) { panel_text(dc,10,37,width-20,app.connecting?"Connecting...":app.connected?"Waiting for host statistics":"Offline",app.normal,app.muted);
+        about_text(dc,10,75,width-20,70,L"Connect to Hermes to see server resources and the configured model.",app.normal,app.muted); return;
+    }
+    panel_text(dc,10,32,width-20,js(s,"hostname"),app.normal,app.muted);
+    if(!compact) { snprintf(text,sizeof(text),"%s / %s",js(s,"os"),js(s,"arch")); panel_text(dc,10,49,width-20,text,app.normal,app.muted); }
+    snprintf(detail,sizeof(detail),"%.0f logical CPUs",number(s,"cpu_count")); resource_meter(dc,start,width,ClassicEngine,"CPU",number(s,"cpu_percent"),cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(s,"cpu_percent"))?100:0,detail,compact);
+    snprintf(detail,sizeof(detail),"%.1f / %.1f GiB",number(memory,"used")/1073741824.0,number(memory,"total")/1073741824.0); resource_meter(dc,start+step,width,ClassicModel,"Memory",number(memory,"used"),number(memory,"total"),detail,compact);
+    snprintf(detail,sizeof(detail),"%.1f / %.1f GiB",number(disk,"used")/1073741824.0,number(disk,"total")/1073741824.0); resource_meter(dc,start+step*2,width,ClassicFolder,"Disk",number(disk,"used"),number(disk,"total"),detail,compact);
+    model_y=height-(compact?42:59);
+    if(height>=330) { snprintf(text,sizeof(text),"Process: %.1f MiB / %.0f threads",number(process,"rss")/1048576.0,number(process,"num_threads")); panel_text(dc,10,242,width-20,text,app.normal,app.muted); }
+    panel_text(dc,10,model_y,width-20,"Server default model",app.heading,app.ink); panel_text(dc,10,model_y+19,width-20,*app.default_model?app.default_model:"Supplied by Hermes",app.normal,app.ink);
+    if(!compact) { snprintf(text,sizeof(text),"Host readings / updated %llu s ago",(unsigned long long)((GetTickCount64()-app.stats_at)/1000)); panel_text(dc,10,height-19,width-20,text,app.normal,app.muted); }
+}
+static LRESULT CALLBACK monitor_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
+    switch(msg) {
+    case WM_PAINT: { PAINTSTRUCT paint; RECT r; HDC dc=BeginPaint(w,&paint),buffer=CreateCompatibleDC(dc); HBITMAP bitmap; HGDIOBJ old;
+        GetClientRect(w,&r); bitmap=CreateCompatibleBitmap(dc,r.right>0?r.right:1,r.bottom>0?r.bottom:1);
+        if(buffer&&bitmap) { old=SelectObject(buffer,bitmap); draw_monitor(w,buffer); BitBlt(dc,0,0,r.right,r.bottom,buffer,0,0,SRCCOPY); SelectObject(buffer,old); } else draw_monitor(w,dc);
+        if(bitmap) DeleteObject(bitmap); if(buffer) DeleteDC(buffer); EndPaint(w,&paint); return 0;
+    }
+    case WM_ERASEBKGND: return 1;
+    case WM_PRINTCLIENT: draw_monitor(w,(HDC)wp); return 0;
+    case WM_SETTEXT: { LRESULT result=DefWindowProcW(w,msg,wp,lp); InvalidateRect(w,NULL,FALSE); return result; }
+    }
+    return DefWindowProcW(w,msg,wp,lp);
 }
 static void draw_about(HDC dc) {
     RECT r={px(14),px(14),px(498),px(82)};
@@ -680,7 +803,7 @@ static LRESULT CALLBACK prompt_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR
 static HMENU workbench_menu(void) {
     HMENU bar=CreateMenu(),file=CreatePopupMenu(),view=CreatePopupMenu(),server=CreatePopupMenu(),help=CreatePopupMenu();
     AppendMenuW(file,MF_STRING,IdNew,L"&New chat\tCtrl+N"); AppendMenuW(file,MF_STRING,IdExport,L"&Export chat..."); AppendMenuW(file,MF_STRING,IdDelete,L"&Delete chat..."); AppendMenuW(file,MF_SEPARATOR,0,NULL); AppendMenuW(file,MF_STRING,IdExit,L"E&xit");
-    AppendMenuW(view,MF_STRING|MF_CHECKED,IdMonitor,L"&Server monitor"); AppendMenuW(view,MF_STRING,IdExpand,L"&Expand folders"); AppendMenuW(view,MF_STRING,IdCollapse,L"&Collapse folders");
+    AppendMenuW(view,MF_STRING|MF_CHECKED,IdMonitor,L"&Server monitor"); AppendMenuW(view,MF_STRING,IdWider,L"Wider chat list"); AppendMenuW(view,MF_STRING,IdNarrower,L"Narrower chat list"); AppendMenuW(view,MF_SEPARATOR,0,NULL); AppendMenuW(view,MF_STRING,IdExpand,L"&Expand folders"); AppendMenuW(view,MF_STRING,IdCollapse,L"&Collapse folders");
     AppendMenuW(server,MF_STRING,IdServer,L"&Connection..."); AppendMenuW(server,MF_STRING,IdReconnect,L"&Reconnect\tCtrl+R"); AppendMenuW(server,MF_STRING,IdRefresh,L"&Refresh chats and workspaces"); AppendMenuW(server,MF_STRING,IdProjects,L"&Workspaces and folders...");
     AppendMenuW(help,MF_STRING,IdAbout,L"&About lcb-hermes...");
     AppendMenuW(bar,MF_POPUP,(UINT_PTR)file,L"&File"); AppendMenuW(bar,MF_POPUP,(UINT_PTR)view,L"&View"); AppendMenuW(bar,MF_POPUP,(UINT_PTR)server,L"&Server"); AppendMenuW(bar,MF_POPUP,(UINT_PTR)help,L"&Help"); return bar;
@@ -690,48 +813,67 @@ static void paint_header(HDC dc,HWND childwindow) {
 }
 static void draw_workbench(HDC dc) {
     RECT r={px(4),px(4),app.width-px(4),px(44)}; HGDIOBJ old=SelectObject(dc,app.normal); int height=MulDiv(app.height,96,app.dpi);
-    classic_edge(dc,r,1); paint_header(dc,app.explorerhead); paint_header(dc,app.title); if(app.monitor_visible) paint_header(dc,app.monitorhead);
-    r=(RECT){px(app.split_x-3),px(50),px(app.split_x+3),px(height-31)}; classic_edge(dc,r,1);
-    SetBkMode(dc,TRANSPARENT); SetTextColor(dc,app.muted); TextOutW(dc,px(12),px(height-118),L"Folder for new chats",20); TextOutW(dc,px(app.split_x+14),px(height-176),L"Message  /  Ctrl+Enter to send",29);
+    { RECT background={0,0,app.width,app.height}; FillRect(dc,&background,app.face); }
+    classic_edge(dc,r,1); paint_header(dc,app.explorerhead); paint_header(dc,app.title); if(app.monitor_visible) { paint_header(dc,app.monitorhead); paint_header(dc,app.activitytitle); }
+    r=(RECT){px(app.split_x-4),px(50),px(app.split_x+4),px(height-31)}; classic_edge(dc,r,1);
+    { int y; for(y=height/2-16;y<height/2+16;y+=4) { RECT dot={px(app.split_x-1),px(y),px(app.split_x+1),px(y+2)}; SetDCBrushColor(dc,app.muted); FillRect(dc,&dot,(HBRUSH)GetStockObject(DC_BRUSH)); } }
+    SetBkMode(dc,TRANSPARENT); SetTextColor(dc,app.muted);
+    { const wchar_t *folder=L"Folder for new chats",*message=L"Message  /  Ctrl+Enter to send"; TextOutW(dc,px(12),px(height-118),folder,(int)wcslen(folder)); TextOutW(dc,px(app.split_x+14),px(height-176),message,(int)wcslen(message)); }
     r=(RECT){px(4),px(height-28),app.width-px(4),app.height-px(3)}; classic_edge(dc,r,0); SelectObject(dc,old);
+}
+static BOOL CALLBACK font_child(HWND w,LPARAM value) { SendMessageW(w,WM_SETFONT,(WPARAM)value,TRUE); return TRUE; }
+static void update_fonts(void) {
+    HFONT normal=app.normal,fixed=app.fixed,heading=app.heading,brand=app.brandfont;
+    app.normal=CreateFontW(-px(13),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Tahoma");
+    app.fixed=CreateFontW(-px(12),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
+    app.heading=CreateFontW(-px(13),0,0,0,FW_BOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Tahoma");
+    app.brandfont=CreateFontW(-px(21),0,0,0,FW_BOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Tahoma");
+    EnumChildWindows(app.window,font_child,(LPARAM)app.normal); if(app.serverwin) EnumChildWindows(app.serverwin,font_child,(LPARAM)app.normal); if(app.projectwin) EnumChildWindows(app.projectwin,font_child,(LPARAM)app.normal); if(app.aboutwin) EnumChildWindows(app.aboutwin,font_child,(LPARAM)app.normal);
+    SendMessageW(app.explorerhead,WM_SETFONT,(WPARAM)app.heading,TRUE); SendMessageW(app.title,WM_SETFONT,(WPARAM)app.heading,TRUE); SendMessageW(app.monitorhead,WM_SETFONT,(WPARAM)app.heading,TRUE); SendMessageW(app.activitytitle,WM_SETFONT,(WPARAM)app.heading,TRUE);
+    if(app.tree) { HIMAGELIST old=app.icons; app.icons=classic_icons(app.dpi); TreeView_SetImageList(app.tree,app.icons,TVSIL_NORMAL); if(old) ImageList_Destroy(old); }
+    if(normal) DeleteObject(normal); if(fixed) DeleteObject(fixed); if(heading) DeleteObject(heading); if(brand) DeleteObject(brand); app.view_valid=0; app.activity_chat=NULL;
+}
+static void paint_workbench(HDC dc) {
+    HDC buffer=CreateCompatibleDC(dc); HBITMAP bitmap=CreateCompatibleBitmap(dc,app.width>0?app.width:1,app.height>0?app.height:1); HGDIOBJ old;
+    if(buffer&&bitmap) { old=SelectObject(buffer,bitmap); draw_workbench(buffer); BitBlt(dc,0,0,app.width,app.height,buffer,0,0,SRCCOPY); SelectObject(buffer,old); } else draw_workbench(dc);
+    if(bitmap) DeleteObject(bitmap); if(buffer) DeleteDC(buffer);
 }
 static LRESULT CALLBACK window_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
     switch(msg) {
     case WM_CREATE:
         app.window=w; app.dpi=(int)GetDpiForWindow(w); app.rich=LoadLibraryW(L"Msftedit.dll");
-        app.normal=CreateFontW(-px(13),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Tahoma"); app.fixed=CreateFontW(-px(12),0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,FIXED_PITCH,L"Consolas");
-        app.heading=CreateFontW(-px(13),0,0,0,FW_BOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Tahoma");
-        app.brandfont=CreateFontW(-px(21),0,0,0,FW_BOLD,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Tahoma");
+        update_fonts();
         app.fresh=child(w,L"BUTTON",L"New chat",WS_TABSTOP|BS_OWNERDRAW,IdNew); app.server=child(w,L"BUTTON",L"",WS_TABSTOP|BS_OWNERDRAW,IdServer); app.title=child(w,L"STATIC",L"new chat",SS_ENDELLIPSIS,0); app.model=child(w,L"BUTTON",L"server default",WS_TABSTOP|BS_OWNERDRAW,IdModel); app.search=child(w,L"EDIT",L"",WS_TABSTOP|ES_AUTOHSCROLL,IdSearch); SendMessageW(app.search,EM_SETCUEBANNER,FALSE,(LPARAM)L"search chats");
         app.tree=child(w,WC_TREEVIEWW,L"",WS_TABSTOP|TVS_SHOWSELALWAYS|TVS_INFOTIP|TVS_HASBUTTONS|TVS_HASLINES|TVS_LINESATROOT,IdTree); SendMessageW(app.tree,TVM_SETEXTENDEDSTYLE,TVS_EX_DOUBLEBUFFER,TVS_EX_DOUBLEBUFFER); app.icons=classic_icons(app.dpi); TreeView_SetImageList(app.tree,app.icons,TVSIL_NORMAL);
-        app.tooltip=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,NULL,WS_POPUP|TTS_ALWAYSTIP,0,0,0,0,w,NULL,app.instance,NULL); { TOOLINFOW t={0}; t.cbSize=sizeof(t); t.uFlags=TTF_IDISHWND|TTF_SUBCLASS; t.hwnd=w; t.uId=(UINT_PTR)app.server; t.lpszText=L"Server connection and login"; SendMessageW(app.tooltip,TTM_ADDTOOLW,0,(LPARAM)&t); }
+        app.tooltip=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,NULL,WS_POPUP|TTS_ALWAYSTIP,0,0,0,0,w,NULL,app.instance,NULL); { TOOLINFOW t={0}; t.cbSize=sizeof(t); t.uFlags=TTF_IDISHWND|TTF_SUBCLASS; t.hwnd=w; t.uId=(UINT_PTR)app.server; t.lpszText=L"Server connection and login"; SendMessageW(app.tooltip,TTM_ADDTOOLW,0,(LPARAM)&t); t.uFlags=TTF_SUBCLASS; t.uId=1; t.lpszText=L"Drag to resize the chat list"; SendMessageW(app.tooltip,TTM_ADDTOOLW,0,(LPARAM)&t); }
         app.transcript=child(w,MSFTEDIT_CLASS,L"",WS_TABSTOP|ES_MULTILINE|ES_READONLY|WS_VSCROLL,0); SendMessageW(app.transcript,EM_EXLIMITTEXT,0,WIRE_LIMIT); SetWindowSubclass(app.transcript,transcript_proc,1,0); SendMessageW(app.transcript,EM_SETOPTIONS,ECOOP_OR,ECO_NOHIDESEL);
         app.prompt=child(w,L"EDIT",L"",WS_TABSTOP|ES_MULTILINE|ES_AUTOVSCROLL|WS_VSCROLL,IdPrompt); SendMessageW(app.prompt,EM_SETLIMITTEXT,256*1024,0); SetWindowSubclass(app.prompt,prompt_proc,1,0);
         app.send=child(w,L"BUTTON",L"send",WS_TABSTOP|BS_OWNERDRAW,IdSend); app.attach=child(w,L"BUTTON",L"attach",WS_TABSTOP|BS_OWNERDRAW,IdAttach); app.request=child(w,L"BUTTON",L"export chat",WS_TABSTOP|BS_OWNERDRAW,IdRequest); app.status=child(w,L"STATIC",L"offline",SS_LEFTNOWORDWRAP,0); app.net=net_new(w);
-        app.explorerhead=child(w,L"STATIC",L"Conversations",SS_ENDELLIPSIS,0); app.monitorhead=child(w,L"STATIC",L"Server monitor",0,0); app.monitor=child(w,L"EDIT",L"",ES_MULTILINE|ES_READONLY|WS_VSCROLL,0);
-        app.activityhead=child(w,L"STATIC",L"Ready",SS_ENDELLIPSIS,0); app.activityview=child(w,L"EDIT",L"",ES_MULTILINE|ES_READONLY|WS_VSCROLL,0); app.progress=child(w,PROGRESS_CLASSW,L"",PBS_MARQUEE,0);
+        app.explorerhead=child(w,L"STATIC",L"Conversations",SS_ENDELLIPSIS,0); app.monitorhead=child(w,L"STATIC",L"Server monitor",0,0); app.monitor=child(w,L"LCBHermesMonitor",L"",0,0);
+        app.activitytitle=child(w,L"STATIC",L"Hermes activity",SS_ENDELLIPSIS,0); app.activityhead=child(w,L"STATIC",L"Ready",SS_ENDELLIPSIS,0); app.activityview=child(w,MSFTEDIT_CLASS,L"",WS_TABSTOP|ES_MULTILINE|ES_READONLY|WS_VSCROLL,0); SendMessageW(app.activityview,EM_SETTARGETDEVICE,0,0); SendMessageW(app.activityview,EM_EXLIMITTEXT,0,32000); app.progress=child(w,PROGRESS_CLASSW,L"",PBS_MARQUEE,0);
         app.workspace=child(w,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST|WS_VSCROLL,IdWorkspace); app.workspacelabel=child(w,L"STATIC",L"Workspace: server default",SS_ENDELLIPSIS,0); app.projectbutton=child(w,L"BUTTON",L"Workspaces...",WS_TABSTOP|BS_OWNERDRAW,IdProjects); app.summary=child(w,L"STATIC",L"",SS_ENDELLIPSIS,0);
-        SendMessageW(app.explorerhead,WM_SETFONT,(WPARAM)app.heading,TRUE); SendMessageW(app.title,WM_SETFONT,(WPARAM)app.heading,TRUE); SendMessageW(app.monitorhead,WM_SETFONT,(WPARAM)app.heading,TRUE); SendMessageW(app.monitor,WM_SETFONT,(WPARAM)app.fixed,TRUE);
+        SendMessageW(app.explorerhead,WM_SETFONT,(WPARAM)app.heading,TRUE); SendMessageW(app.title,WM_SETFONT,(WPARAM)app.heading,TRUE); SendMessageW(app.monitorhead,WM_SETFONT,(WPARAM)app.heading,TRUE); SendMessageW(app.activitytitle,WM_SETFONT,(WPARAM)app.heading,TRUE);
         SetMenu(w,workbench_menu()); CheckMenuItem(GetMenu(w),IdMonitor,MF_BYCOMMAND|(app.show_monitor?MF_CHECKED:MF_UNCHECKED));
         theme(); SetTimer(w,IdHeartbeat,20000,NULL); SetTimer(w,IdTimeout,1000,NULL); SetTimer(w,IdStats,5000,NULL); return 0;
     case WM_SIZE: app.width=LOWORD(lp); app.height=HIWORD(lp); if(app.width&&app.height) layout(); return 0;
     case WM_GETMINMAXINFO: ((MINMAXINFO *)lp)->ptMinTrackSize.x=px(620); ((MINMAXINFO *)lp)->ptMinTrackSize.y=px(450); return 0;
     case WM_DPICHANGED: {
-        RECT *r=(RECT *)lp; app.dpi=LOWORD(wp); SetWindowPos(w,NULL,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE); return 0;
+        RECT *r=(RECT *)lp; app.dpi=LOWORD(wp); update_fonts(); SetWindowPos(w,NULL,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS); render(); return 0;
     }
     case NET_MESSAGE: on_net((NetMessage *)lp); return 0;
     case WM_DRAWITEM: if(((DRAWITEMSTRUCT *)lp)->CtlType==ODT_BUTTON) { draw_button((DRAWITEMSTRUCT *)lp); return TRUE; } break;
-    case WM_LBUTTONDOWN: if(abs(GET_X_LPARAM(lp)-px(app.split_x))<=px(5)) { app.dragging=1; SetCapture(w); SetCursor(LoadCursorW(NULL,IDC_SIZEWE)); } return 0;
-    case WM_MOUSEMOVE: if(app.dragging) { int desired=MulDiv(GET_X_LPARAM(lp),96,app.dpi),maximum=app.monitor_visible?MulDiv(app.width,96,app.dpi)-614:MulDiv(app.width,96,app.dpi)-350; if(desired<160) desired=160; if(desired>maximum) desired=maximum; app.sidebar_width=desired; layout(); } return 0;
+    case WM_LBUTTONDOWN: if(GET_Y_LPARAM(lp)>=px(50)&&GET_Y_LPARAM(lp)<app.height-px(30)&&abs(GET_X_LPARAM(lp)-px(app.split_x))<=px(6)) { app.dragging=1; SetCapture(w); SetCursor(LoadCursorW(NULL,IDC_SIZEWE)); } return 0;
+    case WM_MOUSEMOVE: if(app.dragging) { int desired=MulDiv(GET_X_LPARAM(lp),96,app.dpi),maximum=MulDiv(app.width,96,app.dpi)-370; if(desired<180) desired=180; if(desired>maximum) desired=maximum; app.sidebar_width=desired; layout(); } return 0;
     case WM_LBUTTONUP: if(app.dragging) { app.dragging=0; ReleaseCapture(); schedule_save(); } return 0;
     case WM_CAPTURECHANGED: app.dragging=0; return 0;
-    case WM_SETCURSOR: { POINT p; GetCursorPos(&p); ScreenToClient(w,&p); if(LOWORD(lp)==HTCLIENT && (app.dragging||abs(p.x-px(app.split_x))<=px(5))) { SetCursor(LoadCursorW(NULL,IDC_SIZEWE)); return TRUE; } break; }
+    case WM_SETCURSOR: { POINT p; GetCursorPos(&p); ScreenToClient(w,&p); if(LOWORD(lp)==HTCLIENT && (app.dragging||(p.y>=px(50)&&p.y<app.height-px(30)&&abs(p.x-px(app.split_x))<=px(6)))) { SetCursor(LoadCursorW(NULL,IDC_SIZEWE)); return TRUE; } break; }
     case WM_COMMAND:
         switch(LOWORD(wp)) {
         case IdNew: newchat(); break;
         case IdServer: show_server(); break;
         case IdProjects: show_projects(); break;
         case IdWorkspace: if(HIWORD(wp)==CBN_SELCHANGE) workspace_choice(); break;
+        case IdWider: case IdNarrower: app.sidebar_width=app.split_x+(LOWORD(wp)==IdWider?48:-48); if(app.sidebar_width<180) app.sidebar_width=180; if(app.sidebar_width>MulDiv(app.width,96,app.dpi)-370) app.sidebar_width=MulDiv(app.width,96,app.dpi)-370; layout(); schedule_save(); break;
         case IdMonitor: app.show_monitor=!app.show_monitor; CheckMenuItem(GetMenu(w),IdMonitor,MF_BYCOMMAND|(app.show_monitor?MF_CHECKED:MF_UNCHECKED)); layout(); schedule_save(); break;
         case IdExpand: case IdCollapse: { size_t i; for(i=0;i<app.ngroups;i++) TreeView_Expand(app.tree,app.groups[i].item,LOWORD(wp)==IdExpand?TVE_EXPAND:TVE_COLLAPSE); break; }
         case IdExport: export_chat(); break;
@@ -777,8 +919,8 @@ static LRESULT CALLBACK window_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
         else if(wp==IdList) listchats();
         else if(wp==IdTimeout) { Pending **link=&app.pending; ULONGLONG now=GetTickCount64(); while(*link) { Pending *p=*link; if(now-p->started>90000) { *link=p->next; result(p,NULL,"Server request timed out. The request was not retried."); free(p); } else link=&p->next; } } return 0;
     case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: case WM_CTLCOLORLISTBOX: return color_control(msg,wp,lp);
-    case WM_ERASEBKGND: { RECT r; GetClientRect(w,&r); FillRect((HDC)wp,&r,app.face); return 1; }
-    case WM_PAINT: { PAINTSTRUCT paint; HDC dc=BeginPaint(w,&paint); draw_workbench(dc); EndPaint(w,&paint); return 0; }
+    case WM_ERASEBKGND: return 1;
+    case WM_PAINT: { PAINTSTRUCT paint; HDC dc=BeginPaint(w,&paint); paint_workbench(dc); EndPaint(w,&paint); return 0; }
     case WM_PRINTCLIENT: draw_workbench((HDC)wp); return 0;
     case WM_CLOSE: save(); if(app.aboutwin) DestroyWindow(app.aboutwin); if(app.serverwin) DestroyWindow(app.serverwin); if(app.projectwin) DestroyWindow(app.projectwin); DestroyWindow(w); return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
@@ -790,13 +932,14 @@ static int create_window(HINSTANCE instance,int show) {
     app.instance=instance; app.dpi=96; InitCommonControlsEx(&cc); CoInitializeEx(NULL,COINIT_APARTMENTTHREADED);
     wc.cbSize=sizeof(wc); wc.hInstance=instance; wc.hCursor=LoadCursorW(NULL,IDC_ARROW); wc.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(101)); wc.lpszClassName=L"LCBHermes"; wc.lpfnWndProc=window_proc; RegisterClassExW(&wc);
     wc.lpszClassName=L"LCBHermesServer"; wc.lpfnWndProc=server_proc; RegisterClassExW(&wc); wc.lpszClassName=L"LCBHermesQuestion"; wc.lpfnWndProc=question_proc; RegisterClassExW(&wc); wc.lpszClassName=L"LCBHermesProjects"; wc.lpfnWndProc=project_proc; RegisterClassExW(&wc);
+    wc.lpszClassName=L"LCBHermesMonitor"; wc.lpfnWndProc=monitor_proc; RegisterClassExW(&wc);
     wc.lpszClassName=L"LCBHermesAbout"; wc.lpfnWndProc=about_proc; RegisterClassExW(&wc);
     w=CreateWindowExW(0,L"LCBHermes",L"lcb-hermes",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,CW_USEDEFAULT,CW_USEDEFAULT,1180,800,NULL,NULL,instance,NULL); if(!w) return 0; ShowWindow(w,show); UpdateWindow(w); return 1;
 }
 static void cleanup(void) {
     MSG msg; Pending *p; net_free(app.net); while(PeekMessageW(&msg,app.window,NET_MESSAGE,NET_MESSAGE,PM_REMOVE)) { NetMessage *m=(NetMessage *)msg.lParam; if(m->tag==RestUpload) free(m->context); cJSON_Delete(m->json); free(m); }
     while((p=app.pending)!=NULL) { app.pending=p->next; free(p); } clear_chats(); previews_clear(); cJSON_Delete(app.settings); cJSON_Delete(app.stats); cJSON_Delete(app.models); cJSON_Delete(app.projects); cJSON_Delete(app.project_tree);
-    if(app.nouslogo) DeleteObject(app.nouslogo); if(app.icons) ImageList_Destroy(app.icons); if(app.normal) DeleteObject(app.normal); if(app.fixed) DeleteObject(app.fixed); if(app.heading) DeleteObject(app.heading); if(app.brandfont) DeleteObject(app.brandfont); if(app.face) DeleteObject(app.face); if(app.paper) DeleteObject(app.paper); if(app.rich) FreeLibrary(app.rich); CoUninitialize();
+    free(app.view_rows); free(app.activity_text); if(app.nouslogo) DeleteObject(app.nouslogo); if(app.icons) ImageList_Destroy(app.icons); if(app.normal) DeleteObject(app.normal); if(app.fixed) DeleteObject(app.fixed); if(app.heading) DeleteObject(app.heading); if(app.brandfont) DeleteObject(app.brandfont); if(app.face) DeleteObject(app.face); if(app.paper) DeleteObject(app.paper); if(app.rich) FreeLibrary(app.rich); CoUninitialize();
 }
 static void startup_connection(void) {
     if(*app.url&&*app.cookie) connect_to(app.url,app.user,"",jb(app.profile,"http"),app.cookie);
@@ -805,7 +948,7 @@ static void startup_connection(void) {
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE previous,PWSTR command,int show) {
     MSG msg; cJSON *profiles,*p; (void)previous;(void)command;
     if(!store_path(app.path,1024)) return 1; app.settings=store_read(app.path); if(!app.settings) { app.corrupt=1; app.settings=cJSON_CreateObject(); }
-    app.sidebar_width=(int)number(app.settings,"sidebar_width"); if(app.sidebar_width<160||app.sidebar_width>800) app.sidebar_width=240;
+    app.sidebar_width=(int)number(app.settings,"sidebar_width"); if(app.sidebar_width<160||app.sidebar_width>10000) app.sidebar_width=240;
     app.show_monitor=!cJSON_HasObjectItem(app.settings,"monitor")||jb(app.settings,"monitor"); copytext(app.url,sizeof(app.url),js(app.settings,"active_url")); copytext(app.user,sizeof(app.user),js(app.settings,"active_user"));
     if(!create_window(instance,show)) return 1;
     profile_load(app.url,app.user); sidebar(); render(); if(app.corrupt) notice("Saved settings could not be read. They were preserved; reconnect without saving.");
