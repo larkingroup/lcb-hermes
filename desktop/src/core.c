@@ -53,6 +53,7 @@ void chat_load(Chat *c, const cJSON *r) {
     if(stored!=c->stored) field(c->stored,sizeof(c->stored),stored);
     if(*js(info,"title")) field(c->title,sizeof(c->title),js(info,"title"));
     field(c->model,sizeof(c->model),js(info,"model"));
+    if(*js(info,"provider")) field(c->provider,sizeof(c->provider),js(info,"provider"));
     workspace(c,info);
     cJSON_Delete(c->messages); c->messages=arraycopy(cJSON_GetObjectItemCaseSensitive(r,"messages"));
     { cJSON *row; int ordinal=0; cJSON_ArrayForEach(row,c->messages) if(!strcmp(js(row,"role"),"user")) { char key[40]; const cJSON *a; snprintf(key,sizeof(key),"%d",ordinal++); a=cJSON_GetObjectItemCaseSensitive(c->media,key); if(a) { cJSON_DeleteItemFromObjectCaseSensitive(row,"attachments"); cJSON_AddItemToObject(row,"attachments",cJSON_Duplicate(a,1)); } } }
@@ -87,6 +88,7 @@ int chat_event(Chat *c, const cJSON *e) {
     } else if(!strcmp(type,"session.info")) {
         if(*js(p,"title")) field(c->title,sizeof(c->title),js(p,"title"));
         if(*js(p,"model")) field(c->model,sizeof(c->model),js(p,"model"));
+        if(*js(p,"provider")) field(c->provider,sizeof(c->provider),js(p,"provider"));
         if(*js(p,"stored_session_id")) field(c->stored,sizeof(c->stored),js(p,"stored_session_id"));
         workspace(c,p);
     } else if(!strcmp(type,"session.title")) {
@@ -114,12 +116,13 @@ int chat_event(Chat *c, const cJSON *e) {
     return 1;
 }
 cJSON *chat_json(const Chat *c) {
-    cJSON *o=cJSON_CreateObject(); cJSON_AddStringToObject(o,"key",c->key); cJSON_AddStringToObject(o,"stored",c->stored); cJSON_AddStringToObject(o,"title",c->title);
+    cJSON *o=cJSON_CreateObject(); cJSON_AddStringToObject(o,"model",c->model); cJSON_AddStringToObject(o,"provider",c->provider); cJSON_AddStringToObject(o,"reasoning",c->reasoning); cJSON_AddStringToObject(o,"key",c->key); cJSON_AddStringToObject(o,"stored",c->stored); cJSON_AddStringToObject(o,"title",c->title);
     cJSON_AddStringToObject(o,"cwd",c->cwd); cJSON_AddStringToObject(o,"project_id",c->project_id); cJSON_AddStringToObject(o,"project_name",c->project_name);
     cJSON_AddStringToObject(o,"draft",c->draft); cJSON_AddItemToObject(o,"attachments",cJSON_Duplicate(c->attachments,1)); cJSON_AddItemToObject(o,"media",cJSON_Duplicate(c->media,1)); return o;
 }
 Chat *chat_restore(const cJSON *v) {
     Chat *c=chat_new(js(v,"key")); if(!c) return NULL;
+    field(c->model,sizeof(c->model),js(v,"model")); field(c->provider,sizeof(c->provider),js(v,"provider")); field(c->reasoning,sizeof(c->reasoning),js(v,"reasoning"));
     field(c->stored,sizeof(c->stored),js(v,"stored")); field(c->title,sizeof(c->title),js(v,"title")); free(c->draft); c->draft=textdup(js(v,"draft"));
     field(c->cwd,sizeof(c->cwd),js(v,"cwd")); field(c->project_id,sizeof(c->project_id),js(v,"project_id")); field(c->project_name,sizeof(c->project_name),js(v,"project_name"));
     cJSON_Delete(c->attachments); c->attachments=arraycopy(cJSON_GetObjectItemCaseSensitive(v,"attachments"));
