@@ -28,6 +28,30 @@ configured providers and choose a model and reasoning effort for the current cha
 OpenAI/Codex choices follow Hermes's supported effort ladder. Changes during a turn
 apply on the next turn; new drafts carry their choices in `session.create`.
 
+Chats contains conversations in the default server folder and those without a
+saved folder. Scheduled runs contains cron conversations. Other registered folders
+use their project name; hover a chat to see its server path. Opening a chat never
+moves its saved workspace. The default folder is on the server, not this PC.
+
+View > Minimize to tray keeps the connection open. Click the tray icon to return;
+right-click for Open or Exit. Closing the window exits. Reply and cron notifications
+can be toggled in View. Cron status is checked every 30 seconds while connected;
+the first check establishes a baseline. Click a cron notification to show Scheduled
+runs in the native sidebar.
+
+Server > Default model on server saves the default for new sessions. The toolbar
+model button still changes only the current chat. Server > Settings and providers
+opens native controls for API keys, supported OAuth sign-ins, custom endpoints,
+the default server folder and automatic title upgrades. Provider sign-in opens its
+HTTPS consent page on this PC; tokens stay on Hermes. Providers marked external
+still require the server command shown in the panel.
+
+Update support comes from Hermes. Container-managed installations must be updated
+through their container host; the panel reports this and disables in-app updating.
+The resource monitor shows only the server and its resource readings.
+
+[Native server settings preview](../branding/pc-settings.png).
+
 Settings and login cookies use Windows DPAPI at
 `%LOCALAPPDATA%\LCB\hermes\private.bin`. Passwords are not saved.
 Closing the client leaves server tasks running.
@@ -44,3 +68,6 @@ cmake --build desktop/build --config Release
 
 `desktop/scripts/build.ps1` runs these steps. Package with
 `python desktop/scripts/package.py --binary desktop/build/Release/lcb-hermes.exe`.
+
+For the native contract checks, configure with `-DLCB_BUILD_TESTS=ON`, build, then
+run `ctest --test-dir desktop/build -C Release --output-on-failure`.

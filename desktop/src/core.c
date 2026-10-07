@@ -18,12 +18,15 @@ static void activity(Chat *c, const char *text) {
     while(cJSON_GetArraySize(c->activity_log)>40) cJSON_DeleteItemFromArray(c->activity_log,0);
 }
 static void workspace(Chat *c, const cJSON *info) {
-    const cJSON *p=cJSON_GetObjectItemCaseSensitive(info,"project");
+    /* Runtime cwd may be a launch-directory fallback. It is not membership. */
     if(cJSON_HasObjectItem(info,"cwd")) field(c->cwd,sizeof(c->cwd),js(info,"cwd"));
-    if(cJSON_HasObjectItem(info,"project")) {
-        field(c->project_id,sizeof(c->project_id),js(p,"id"));
-        field(c->project_name,sizeof(c->project_name),js(p,"name"));
-    }
+}
+void chat_project(Chat *c,const cJSON *p,const cJSON *row) {
+    int unfiled=jb(p,"isNoProject");
+    field(c->folder,sizeof(c->folder),unfiled?"":js(row,"cwd"));
+    field(c->project_id,sizeof(c->project_id),unfiled?"":js(p,"id"));
+    field(c->project_name,sizeof(c->project_name),unfiled?"":js(p,"label"));
+    c->folder_known=1;
 }
 
 char *row_text(const cJSON *row) {
@@ -131,6 +134,7 @@ int chat_event(Chat *c, const cJSON *e) {
 cJSON *chat_json(const Chat *c) {
     cJSON *o=cJSON_CreateObject(); cJSON_AddStringToObject(o,"list_id",c->list_id); cJSON_AddStringToObject(o,"source",c->source); cJSON_AddNumberToObject(o,"started_at",c->started_at); cJSON_AddNumberToObject(o,"order",(double)c->order); cJSON_AddBoolToObject(o,"listed",c->listed); cJSON_AddBoolToObject(o,"completed_unread",c->completed_unread); cJSON_AddStringToObject(o,"model",c->model); cJSON_AddStringToObject(o,"provider",c->provider); cJSON_AddStringToObject(o,"reasoning",c->reasoning); cJSON_AddStringToObject(o,"key",c->key); cJSON_AddStringToObject(o,"stored",c->stored); cJSON_AddStringToObject(o,"title",c->title);
     cJSON_AddStringToObject(o,"cwd",c->cwd); cJSON_AddStringToObject(o,"project_id",c->project_id); cJSON_AddStringToObject(o,"project_name",c->project_name);
+    cJSON_AddStringToObject(o,"folder",c->folder); cJSON_AddBoolToObject(o,"folder_known",c->folder_known);
     cJSON_AddStringToObject(o,"draft",c->draft); cJSON_AddItemToObject(o,"attachments",cJSON_Duplicate(c->attachments,1)); cJSON_AddItemToObject(o,"media",cJSON_Duplicate(c->media,1)); return o;
 }
 Chat *chat_restore(const cJSON *v) {
@@ -142,6 +146,8 @@ Chat *chat_restore(const cJSON *v) {
     field(c->model,sizeof(c->model),js(v,"model")); field(c->provider,sizeof(c->provider),js(v,"provider")); field(c->reasoning,sizeof(c->reasoning),js(v,"reasoning"));
     field(c->stored,sizeof(c->stored),js(v,"stored")); field(c->title,sizeof(c->title),js(v,"title")); free(c->draft); c->draft=textdup(js(v,"draft"));
     field(c->cwd,sizeof(c->cwd),js(v,"cwd")); field(c->project_id,sizeof(c->project_id),js(v,"project_id")); field(c->project_name,sizeof(c->project_name),js(v,"project_name"));
+    field(c->folder,sizeof(c->folder),js(v,"folder")); c->folder_known=jb(v,"folder_known");
+    if(!c->folder_known) c->project_id[0]=c->project_name[0]=0;
     cJSON_Delete(c->attachments); c->attachments=arraycopy(cJSON_GetObjectItemCaseSensitive(v,"attachments"));
     if(cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(v,"media"))) { cJSON_Delete(c->media); c->media=cJSON_Duplicate(cJSON_GetObjectItemCaseSensitive(v,"media"),1); } return c;
 }

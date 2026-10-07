@@ -22,9 +22,9 @@
 #include "classic_win.h"
 #include "markdown.h"
 
-enum { IdTree=100,IdPrompt,IdSend,IdNew,IdServer,IdModel,IdSearch,IdAttach,IdRequest,IdExport,IdReconnect,IdRefresh,IdRename,IdDelete,IdForget,IdAbout,IdDraft,IdRemoveAttachment,IdWorkspace,IdProjects,IdMonitor,IdExpand,IdCollapse,IdExit,IdWider,IdNarrower,IdManageServers,IdAddServer,IdRender=300,IdSave,IdHeartbeat,IdTimeout,IdStats,IdList };
-enum { RpcCaps=1,RpcList,RpcResume,RpcCreate,RpcSubmit,RpcStop,RpcModels,RpcAttach,RpcRename,RpcDelete,RpcPing,RpcCloseDelete,RpcResumeSend,RpcProjects,RpcProjectCreate,RpcProjectAdd,RpcDefaultModel,RpcProjectTree,RpcSetModel,RpcReasoning,RpcDetach,RpcImageReset };
-enum { RestStats=1,RestUpload };
+enum { IdTree=100,IdPrompt,IdSend,IdNew,IdServer,IdModel,IdSearch,IdAttach,IdRequest,IdExport,IdReconnect,IdRefresh,IdRename,IdDelete,IdForget,IdAbout,IdDraft,IdRemoveAttachment,IdWorkspace,IdProjects,IdMonitor,IdExpand,IdCollapse,IdExit,IdWider,IdNarrower,IdManageServers,IdAddServer,IdMinTray,IdNotify,IdRestore,IdServerModel,IdDashboard,IdTitleModel,IdRender=300,IdSave,IdHeartbeat,IdTimeout,IdStats,IdList,IdCron };
+enum { RpcCaps=1,RpcList,RpcResume,RpcCreate,RpcSubmit,RpcStop,RpcModels,RpcAttach,RpcRename,RpcDelete,RpcPing,RpcCloseDelete,RpcResumeSend,RpcProjects,RpcProjectCreate,RpcProjectAdd,RpcDefaultModel,RpcProjectTree,RpcSetModel,RpcReasoning,RpcDetach,RpcImageReset,RpcDefaultFolder };
+enum { RestStats=1,RestUpload,RestCron,RestSetDefault,RestConfig };
 typedef struct Pending { int id, kind; Chat *chat; char value[500],reasoning[32],provider[160],path[1024]; int confirmed; ULONGLONG started; struct Pending *next; } Pending;
 typedef struct Preview { HBITMAP bitmap; LONG anchor; int width,height; } Preview;
 typedef struct Upload { Chat *chat; wchar_t path[32768]; struct Upload *next; } Upload;
@@ -39,11 +39,14 @@ static struct {
     HBITMAP nouslogo; int logo_width,logo_height;
     int dpi,width,height,connected,connecting,restoring,nextid,treebusy,models_pending,models_open,uploads,corrupt;
     int sidebar_width,split_x,dragging,show_monitor,monitor_visible,monitor_x,stats_pending,projects_supported,message_y;
-    int list_pending,list_again,render_pending,project_pending;
+    int list_pending,list_again,render_pending,project_pending,tree_pending,tree_again;
+    int min_tray,notifications,shell_icon,cron_pending,cron_disabled,server_model,default_pending;
+    UINT taskbar_created; unsigned int ponder; char notification_chat[65]; int notification_cron;
+    cJSON *default_request;
     unsigned long long order_clock;
     Chat *model_chat; int model_dirty;
     COLORREF ink,muted,bg,fg,accent; wchar_t path[1024]; char url[1024],user[256],cookie[8192],notice[512],version[80],newmodel[160],newprovider[160],epoch[160];
-    char default_model[160],newcwd[1024]; ULONGLONG stats_at,turn_at;
+    char default_model[160],newcwd[1024],server_cwd[1024]; ULONGLONG stats_at,turn_at;
     Net *net; cJSON *settings,*profile,*stats,*models,*projects,*project_tree; Pending *pending; Upload *upload_jobs; Chat **chats,*current; size_t count,capacity;
     TreeRow rows[1000]; size_t nrows; TreeGroup groups[1000]; size_t ngroups;
     Preview previews[128]; int npreviews,tray_height,tray_offset,tray_selected; Chat *tray_chat; unsigned long long tray_hash; char *status_text;
@@ -61,6 +64,14 @@ static void activity_render(const char *text);
 static void coalesce_chat(Chat *keep);
 static LRESULT CALLBACK monitor_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp);
 static void update_fonts(void);
+static void shell_restore(void), shell_notify(const char *title,const char *body,Chat *c,int cron), show_scheduled(void);
+static int shell_add(void);
+static void poll_cron(void);
+static void cron_snapshot(const cJSON *jobs);
+static void answer(cJSON *request,cJSON *value,const char *error);
+static void show_admin(void), admin_close(void), admin_folder_result(const char *error);
+static void admin_result(NetMessage *m);
+static HWND admin_window(void);
 static void visible(HWND w,int show);
 static void tray_refresh(void), remove_attachment(Chat *c,int index,int all);
 static LRESULT CALLBACK tray_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp);
@@ -77,7 +88,7 @@ static void freshkey(char out[65]) { GUID id; if(SUCCEEDED(CoCreateGuid(&id))) s
 static int addchat(Chat *c) { if(!c) return 0; if(app.count==app.capacity) { size_t cap=app.capacity?app.capacity*2:16; Chat **next=realloc(app.chats,cap*sizeof(*next)); if(!next) { chat_free(c); return 0; } app.chats=next; app.capacity=cap; } app.chats[app.count++]=c; return 1; }
 static Chat *findchat(const char *id) { size_t i; if(!*id) return NULL; for(i=0;i<app.count;i++) if(chat_matches(app.chats[i],id)) return app.chats[i]; return NULL; }
 static int chat_visible(const Chat *c) { return !*c->stored||c->listed||c->running||c->pending||*c->draft||cJSON_GetArraySize(c->attachments)||c==app.current; }
-static void newchat(void) { char key[65]; Chat *c; freshkey(key); c=chat_new(key); if(!c) return; copytext(c->cwd,sizeof(c->cwd),app.newcwd); c->order=++app.order_clock; copytext(c->source,sizeof(c->source),"desktop"); if(!addchat(c)) return; app.current=c; app.notice[0]=0; sidebar(); render(); schedule_save(); SetFocus(app.prompt); }
+static void newchat(void) { char key[65]; Chat *c; freshkey(key); c=chat_new(key); if(!c) return; copytext(c->cwd,sizeof(c->cwd),*app.newcwd?app.newcwd:app.server_cwd); c->order=++app.order_clock; copytext(c->source,sizeof(c->source),"desktop"); if(!addchat(c)) return; app.current=c; app.notice[0]=0; sidebar(); render(); schedule_save(); SetFocus(app.prompt); }
 static void clear_chats(void) { size_t i; Upload *u; for(u=app.upload_jobs;u;u=u->next) u->chat=NULL; app.view_valid=0; app.view_chat=app.activity_chat=NULL; app.treebusy=1; TreeView_DeleteAllItems(app.tree); app.nrows=app.ngroups=0; app.treebusy=0; for(i=0;i<app.count;i++) chat_free(app.chats[i]); free(app.chats); app.chats=NULL; app.count=app.capacity=0; app.current=NULL; }
 static void upload_done(Upload *u) { Upload **link=&app.upload_jobs; while(*link&&*link!=u) link=&(*link)->next; if(*link) *link=u->next; free(u); }
 static void merge_attachments(cJSON *target,const cJSON *source) {
@@ -112,11 +123,11 @@ static void coalesce_chat(Chat *keep) {
 static void profile_load(const char *url,const char *user) {
     cJSON *profiles=cJSON_GetObjectItemCaseSensitive(app.settings,"profiles"),*p,*a,*v; const char *active;
     clear_chats(); app.profile=NULL;
-    app.newmodel[0]=app.newprovider[0]=app.newcwd[0]=app.default_model[0]=0; cJSON_Delete(app.projects); app.projects=NULL; cJSON_Delete(app.project_tree); app.project_tree=NULL; app.projects_supported=0;
+    app.newmodel[0]=app.newprovider[0]=app.newcwd[0]=app.default_model[0]=app.server_cwd[0]=0; cJSON_Delete(app.projects); app.projects=NULL; cJSON_Delete(app.project_tree); app.project_tree=NULL; app.projects_supported=0; app.notification_chat[0]=0; app.notification_cron=0;
     if(!cJSON_IsArray(profiles)) { profiles=cJSON_CreateArray(); cJSON_AddItemToObject(app.settings,"profiles",profiles); }
     cJSON_ArrayForEach(p,profiles) if(!strcmp(js(p,"url"),url)&&!strcmp(js(p,"user"),user)) { app.profile=p; break; }
     if(!app.profile) { app.profile=cJSON_CreateObject(); put(app.profile,"url",url); put(app.profile,"user",user); cJSON_AddItemToArray(profiles,app.profile); }
-    copytext(app.newcwd,sizeof(app.newcwd),js(app.profile,"workspace"));
+    copytext(app.newcwd,sizeof(app.newcwd),js(app.profile,"workspace")); copytext(app.server_cwd,sizeof(app.server_cwd),js(app.profile,"server_cwd"));
     a=cJSON_GetObjectItemCaseSensitive(app.profile,"chats"); cJSON_ArrayForEach(v,a) if(app.count<1000) { Chat *c=chat_restore(v); if(c&&c->order>app.order_clock) app.order_clock=c->order; addchat(c); }
     { size_t i; for(i=0;i<app.count;i++) coalesce_chat(app.chats[i]); }
     active=js(app.profile,"active"); app.current=findchat(active); if(!app.current&&app.count) app.current=app.chats[0]; if(!app.current) newchat();
@@ -127,6 +138,8 @@ static void profile_load(const char *url,const char *user) {
 static void save(void) {
     cJSON *a; size_t i; KillTimer(app.window,IdSave); if(!app.settings||app.corrupt) return;
     cJSON_DeleteItemFromObjectCaseSensitive(app.settings,"dark");
+    cJSON_DeleteItemFromObjectCaseSensitive(app.settings,"minimize_to_tray"); cJSON_AddBoolToObject(app.settings,"minimize_to_tray",app.min_tray);
+    cJSON_DeleteItemFromObjectCaseSensitive(app.settings,"notifications"); cJSON_AddBoolToObject(app.settings,"notifications",app.notifications);
     cJSON_DeleteItemFromObjectCaseSensitive(app.settings,"sidebar_width"); cJSON_AddNumberToObject(app.settings,"sidebar_width",app.sidebar_width);
     cJSON_DeleteItemFromObjectCaseSensitive(app.settings,"monitor"); cJSON_AddBoolToObject(app.settings,"monitor",app.show_monitor);
     if(app.profile) { a=cJSON_CreateArray(); for(i=0;i<app.count;i++) cJSON_AddItemToArray(a,chat_json(app.chats[i])); cJSON_DeleteItemFromObjectCaseSensitive(app.profile,"chats"); cJSON_AddItemToObject(app.profile,"chats",a); put(app.profile,"active",app.current?app.current->key:""); }
@@ -139,12 +152,13 @@ static int rpc(const char *method,cJSON *p,int kind,Chat *chat) {
     frame=cJSON_CreateObject(); cJSON_AddStringToObject(frame,"jsonrpc","2.0"); cJSON_AddNumberToObject(frame,"id",wait->id); cJSON_AddStringToObject(frame,"method",method); cJSON_AddItemToObject(frame,"params",p); net_send(app.net,frame); cJSON_Delete(frame); return wait->id;
 }
 static void listchats(void) { cJSON *p; KillTimer(app.window,IdList); if(app.list_pending) { app.list_again=1; return; } p=params(); cJSON_AddNumberToObject(p,"limit",500); app.list_pending=rpc("session.list",p,RpcList,NULL)!=0; }
-static void project_tree(void) { cJSON *p=params(); cJSON_AddNumberToObject(p,"preview_limit",500); cJSON_AddNumberToObject(p,"session_limit",500); rpc("projects.tree",p,RpcProjectTree,NULL); }
+static void project_tree(void) { cJSON *p; if(app.tree_pending) { app.tree_again=1; return; } p=params(); cJSON_AddNumberToObject(p,"preview_limit",500); cJSON_AddNumberToObject(p,"session_limit",500); app.tree_pending=rpc("projects.tree",p,RpcProjectTree,NULL)!=0; }
 static void tree_metadata(void) {
     const cJSON *p,*s;
     cJSON_ArrayForEach(p,cJSON_GetObjectItemCaseSensitive(app.project_tree,"projects")) cJSON_ArrayForEach(s,cJSON_GetObjectItemCaseSensitive(p,"previewSessions")) {
-        Chat *c=findchat(js(s,"id")); if(!c||c->loaded) continue;
-        copytext(c->cwd,sizeof(c->cwd),js(s,"cwd")); copytext(c->project_id,sizeof(c->project_id),jb(p,"isNoProject")?"":js(p,"id")); copytext(c->project_name,sizeof(c->project_name),jb(p,"isNoProject")?"":js(p,"label"));
+        Chat *c=findchat(js(s,"id")); if(!c) continue;
+        chat_project(c,p,s);
+        if(!c->loaded) copytext(c->cwd,sizeof(c->cwd),js(s,"cwd"));
     }
 }
 static void resume(Chat *c) { cJSON *p; if(!c||!*c->stored||c->pending||!app.connected) return; p=params(); cJSON_AddStringToObject(p,"session_id",c->stored); cJSON_AddStringToObject(p,"source","desktop"); cJSON_AddBoolToObject(p,"close_on_disconnect",0); c->pending=1; rpc("session.resume",p,RpcResume,c); controls(); }
@@ -154,7 +168,7 @@ static void status_stats(void) {
     char buffer[2048]; const cJSON *s=app.stats,*memory=cJSON_GetObjectItemCaseSensitive(s,"memory"), *process=cJSON_GetObjectItemCaseSensitive(s,"process"),*disk=cJSON_GetObjectItemCaseSensitive(s,"disk");
     HWND view=app.serverwin?GetDlgItem(app.serverwin,507):NULL;
     if(!s || !app.connected) { snprintf(buffer,sizeof(buffer),"%s\r\n\r\n%s",app.connecting?"Connecting...":app.connected?"Connected":"Offline",app.connected?"Waiting for server statistics.":"Connect to Hermes to view live host statistics."); }
-    else snprintf(buffer,sizeof(buffer),"HERMES  %s\r\n%s\r\n%s / %s\r\n\r\nHOST RESOURCES\r\nCPU    %.1f%% / %.0f CPUs\r\nRAM    %.1f / %.1f GiB\r\nFree   %.1f GiB\r\nDisk   %.1f / %.1f GiB\r\n\r\nHERMES PROCESS\r\nMemory   %.1f MiB\r\nThreads  %.0f\r\n\r\nSERVER DEFAULT MODEL\r\n%s\r\n\r\nUpdated %llu s ago\r\nFigures describe the server host.",js(s,"hermes_version"),js(s,"hostname"),js(s,"os"),js(s,"arch"),number(s,"cpu_percent"),number(s,"cpu_count"),number(memory,"used")/1073741824.0,number(memory,"total")/1073741824.0,number(memory,"available")/1073741824.0,number(disk,"used")/1073741824.0,number(disk,"total")/1073741824.0,number(process,"rss")/1048576.0,number(process,"num_threads"),*app.default_model?app.default_model:"Supplied by Hermes",(unsigned long long)((GetTickCount64()-app.stats_at)/1000));
+    else snprintf(buffer,sizeof(buffer),"HERMES  %s\r\n%s\r\n%s / %s\r\n\r\nHOST RESOURCES\r\nCPU    %.1f%% / %.0f CPUs\r\nRAM    %.1f / %.1f GiB\r\nFree   %.1f GiB\r\nDisk   %.1f / %.1f GiB\r\n\r\nHERMES PROCESS\r\nMemory   %.1f MiB\r\nThreads  %.0f\r\n\r\nUpdated %llu s ago\r\nFigures describe the server host.",js(s,"hermes_version"),js(s,"hostname"),js(s,"os"),js(s,"arch"),number(s,"cpu_percent"),number(s,"cpu_count"),number(memory,"used")/1073741824.0,number(memory,"total")/1073741824.0,number(memory,"available")/1073741824.0,number(disk,"used")/1073741824.0,number(disk,"total")/1073741824.0,number(process,"rss")/1048576.0,number(process,"num_threads"),(unsigned long long)((GetTickCount64()-app.stats_at)/1000));
     settext(view,buffer); settext(app.monitor,buffer);
 }
 static void activity_render(const char *text) {
@@ -185,12 +199,18 @@ static void controls(void) {
     if(c&&*c->reasoning) { snprintf(line,sizeof(line),"%s  /  %s",label,c->reasoning); settext(app.model,line); }
     for(i=0;i<app.count;i++) { if(app.chats[i]->running) working++; if(chat_visible(app.chats[i])) used++; }
     snprintf(line,sizeof(line),"%zu chats  |  %zu working",used,working); used=0; settext(app.summary,line);
-    if(c && c->running) snprintf(line,sizeof(line),"%s...",*c->activity?c->activity:"Working"); else snprintf(line,sizeof(line),"%s",c&&*c->activity?c->activity:"Ready");
+    if(c && c->running) { static const char *verbs[]={"Pondering","Musing","Reflecting","Deliberating"}; const char *state=c->activity; if(!*state||!strcmp(state,"Working")||!strcmp(state,"Thinking")||!strcmp(state,"Hermes is working")) state=verbs[app.ponder%4]; snprintf(line,sizeof(line),"%s...",state); } else snprintf(line,sizeof(line),"%s",c&&*c->activity?c->activity:"Ready");
     settext(app.activityhead,line); ShowWindow(app.progress,app.monitor_visible&&c&&c->running?SW_SHOW:SW_HIDE); SendMessageW(app.progress,PBM_SETMARQUEE,c&&c->running,80);
     log[0]=0; if(c) cJSON_ArrayForEach(entry,c->activity_log) if(cJSON_IsString(entry) && used+strlen(entry->valuestring)+7<sizeof(log)) { int n=snprintf(log+used,sizeof(log)-used,"\xe2\x80\xa2 %s\r\n",entry->valuestring); if(n>0) used+=(size_t)n; }
     if(!used) copytext(log,sizeof(log),"Tools, thinking and progress from this chat will appear here."); activity_render(log);
     EnableWindow(app.projectbutton,app.connected&&app.projects_supported); EnableWindow(app.workspace,app.connected&&app.projects_supported);
     if(app.serverwin) { snprintf(line,sizeof(line),"%s%s%s",app.connecting?"Connecting":app.connected?"Connected":"Offline",*app.notice?" / ":"",app.notice); settext(GetDlgItem(app.serverwin,508),line); EnableWindow(GetDlgItem(app.serverwin,505),!app.connecting); }
+}
+static const char *folder_name(const char *path) { const char *last=strrchr(path,'/'); if(!last) last=strrchr(path,'\\'); return last&&last[1]?last+1:path; }
+static const char *chat_group(const Chat *c) {
+    const char *folder=*c->stored?(c->folder_known?c->folder:""):c->cwd;
+    if(!strcmp(c->source,"cron")) return "@cron";
+    return !*folder||!strcmp(folder,app.server_cwd)?"":folder;
 }
 static int CALLBACK chat_order(LPARAM a,LPARAM b,LPARAM context) { const Chat *x=(Chat *)a,*y=(Chat *)b; (void)context; if(x->order!=y->order) return x->order>y->order?-1:1; return strcmp(x->key,y->key); }
 static void sidebar(void) {
@@ -202,19 +222,19 @@ static void sidebar(void) {
         if(!exists) { TreeView_DeleteItem(app.tree,app.rows[i].item); memmove(app.rows+i,app.rows+i+1,(app.nrows-i-1)*sizeof(*app.rows)); app.nrows--; } else i++;
     }
     for(i=0;i<app.count;i++) {
-        Chat *c=app.chats[i]; TVINSERTSTRUCTW item={0}; wchar_t label[360],oldlabel[360], *title=wide(c->title); HTREEITEM h=NULL,parent=NULL; TreeRow *row=NULL; int newgroup=0;
+        Chat *c=app.chats[i]; const char *folder=chat_group(c); TVINSERTSTRUCTW item={0}; wchar_t label[360],oldlabel[360], *title=wide(c->title); HTREEITEM h=NULL,parent=NULL; TreeRow *row=NULL; int newgroup=0;
         if(!title) continue;
         for(j=0;j<app.nrows;j++) if(app.rows[j].chat==c) { row=&app.rows[j]; break; }
         if(!chat_visible(c)||(query&&*query&&!StrStrIW(title,query))) { if(row) { TreeView_DeleteItem(app.tree,row->item); memmove(row,row+1,(app.nrows-j-1)*sizeof(*row)); app.nrows--; } free(title); continue; }
-        for(j=0;j<app.ngroups;j++) if(!strcmp(app.groups[j].path,c->cwd)) { parent=app.groups[j].item; break; }
+        for(j=0;j<app.ngroups;j++) if(!strcmp(app.groups[j].path,folder)) { parent=app.groups[j].item; break; }
         if(!parent && app.ngroups<1000) {
             char group[1400]; wchar_t *name;
-            snprintf(group,sizeof(group),"%s%s%s",*c->project_name?c->project_name:*c->cwd?"Folder":"Unfiled chats",*c->cwd?"  /  ":"",c->cwd); name=wide(group);
+            snprintf(group,sizeof(group),"%s",!strcmp(folder,"@cron")?"Scheduled runs":!*folder?"Chats":*c->project_name?c->project_name:folder_name(folder)); name=wide(group);
             item.hParent=TVI_ROOT; item.hInsertAfter=TVI_LAST; item.item.mask=TVIF_TEXT|TVIF_IMAGE|TVIF_SELECTEDIMAGE; item.item.pszText=name; item.item.iImage=item.item.iSelectedImage=ClassicFolder;
-            parent=TreeView_InsertItem(app.tree,&item); free(name); copytext(app.groups[app.ngroups].path,1024,c->cwd); app.groups[app.ngroups++].item=parent; newgroup=1;
+            parent=TreeView_InsertItem(app.tree,&item); free(name); copytext(app.groups[app.ngroups].path,1024,folder); app.groups[app.ngroups++].item=parent; newgroup=1;
         }
-        if(parent && *c->project_name && !newgroup) {
-            char group[1400]; wchar_t *label; TVITEMW current={0}; wchar_t old[1400]; snprintf(group,sizeof(group),"%s  /  %s",c->project_name,c->cwd); label=wide(group);
+        if(parent && *folder && strcmp(folder,"@cron") && *c->project_name && !newgroup) {
+            char group[1400]; wchar_t *label; TVITEMW current={0}; wchar_t old[1400]; snprintf(group,sizeof(group),"%s",c->project_name); label=wide(group);
             current.hItem=parent; current.mask=TVIF_TEXT; current.pszText=old; current.cchTextMax=1400; TreeView_GetItem(app.tree,&current); if(label&&wcscmp(old,label)) { current.pszText=label; TreeView_SetItem(app.tree,&current); } free(label);
         }
         if(row && row->parent!=parent) { TreeView_DeleteItem(app.tree,row->item); memmove(row,row+1,(app.nrows-(size_t)(row-app.rows)-1)*sizeof(*row)); app.nrows--; row=NULL; }
@@ -458,7 +478,7 @@ static void submit(void) {
     if(c->running) { rpc("session.interrupt",sessionparams(c),RpcStop,c); return; }
     if(!*c->draft&&!cJSON_GetArraySize(c->attachments)) return; c->pending=1;
     if(!*c->id && *c->stored) { p=params(); cJSON_AddStringToObject(p,"session_id",c->stored); cJSON_AddStringToObject(p,"source","desktop"); cJSON_AddBoolToObject(p,"close_on_disconnect",0); rpc("session.resume",p,RpcResumeSend,c); }
-    else if(!*c->id) { p=params(); cJSON_AddStringToObject(p,"source","desktop"); cJSON_AddBoolToObject(p,"close_on_disconnect",0); if(*c->cwd) cJSON_AddStringToObject(p,"cwd",c->cwd); if(*c->model) { cJSON_AddStringToObject(p,"model",c->model); if(*c->provider) cJSON_AddStringToObject(p,"provider",c->provider); } if(*c->reasoning) cJSON_AddStringToObject(p,"reasoning_effort",c->reasoning); rpc("session.create",p,RpcCreate,c); }
+    else if(!*c->id) { if(!*c->cwd&&!*app.newcwd) copytext(c->cwd,sizeof(c->cwd),app.server_cwd); p=params(); cJSON_AddStringToObject(p,"source","desktop"); cJSON_AddBoolToObject(p,"close_on_disconnect",0); if(*c->cwd) cJSON_AddStringToObject(p,"cwd",c->cwd); if(*c->model) { cJSON_AddStringToObject(p,"model",c->model); if(*c->provider) cJSON_AddStringToObject(p,"provider",c->provider); } if(*c->reasoning) cJSON_AddStringToObject(p,"reasoning_effort",c->reasoning); rpc("session.create",p,RpcCreate,c); }
     else start_send(c); controls();
 }
 static void incoming_event(cJSON *e) {
@@ -473,7 +493,7 @@ static void incoming_event(cJSON *e) {
         if(!strcmp(type,"message.start")) { c->completed_unread=0; c->order=++app.order_clock; }
         if(!strcmp(type,"session.info")||!strcmp(type,"session.title")||!strcmp(type,"message.start")) { sidebar(); schedule_save(); }
         if(!strcmp(type,"message.complete")) { c->unread=c->completed_unread=c!=app.current; c->order=++app.order_clock; app.notice[0]=0; sidebar(); schedule_save();
-            if(GetForegroundWindow()!=app.window || c!=app.current) { FLASHWINFO flash={sizeof(flash),app.window,FLASHW_TRAY,2,0}; FlashWindowEx(&flash); MessageBeep(MB_OK); }
+            if(GetForegroundWindow()!=app.window || c!=app.current || !IsWindowVisible(app.window)) shell_notify(c->title,*js(p,"error")?"Hermes reported an error. Open the chat to review.":!strcmp(js(p,"status"),"interrupted")?"Hermes stopped. Open the chat to review.":"Hermes has finished. Open the chat to read the reply.",c,0);
             if(c==app.current && *js(p,"error")) notice(js(p,"error")); listchats();
         } controls();
     }
@@ -481,10 +501,13 @@ static void incoming_event(cJSON *e) {
 static void incoming_request(cJSON *r) {
     const cJSON *p=cJSON_GetObjectItemCaseSensitive(r,"params"),*old; Chat *c=findchat(js(p,"session_id"));
     if(c) cJSON_ArrayForEach(old,c->requests) if(cJSON_Compare(cJSON_GetObjectItemCaseSensitive(old,"id"),cJSON_GetObjectItemCaseSensitive(r,"id"),1)) return;
-    if(!c) c=app.current; if(!c) return; cJSON_AddItemToArray(c->requests,cJSON_Duplicate(r,1)); c->unread=c!=app.current; sidebar(); controls();
+    if(!c) { answer(r,NULL,"This session is not open in this client."); return; } cJSON_AddItemToArray(c->requests,cJSON_Duplicate(r,1)); c->unread=c!=app.current; sidebar(); controls();
+    if(GetForegroundWindow()!=app.window||c!=app.current||!IsWindowVisible(app.window)) shell_notify(c->title,"Hermes needs your input. Open the chat to respond.",c,0);
 }
 static void result(Pending *wait,const cJSON *r,const char *error) {
     Chat *c=wait->chat; cJSON *v,*array;
+    if(wait->kind==RpcDefaultFolder) { if(!*error) { copytext(app.server_cwd,sizeof(app.server_cwd),js(r,"cwd")); if(app.profile) put(app.profile,"server_cwd",app.server_cwd); sidebar(); schedule_save(); } admin_folder_result(error); controls(); return; }
+    if(wait->kind==RpcProjectTree) { app.tree_pending=0; if(app.tree_again) { app.tree_again=0; project_tree(); } }
     if(wait->kind==RpcList) { app.list_pending=0; if(app.list_again) { app.list_again=0; SetTimer(app.window,IdList,250,NULL); } }
     if(wait->kind==RpcProjectCreate||wait->kind==RpcProjectAdd) { app.project_pending=0; if(app.projectwin) { EnableWindow(GetDlgItem(app.projectwin,605),TRUE); EnableWindow(GetDlgItem(app.projectwin,606),chosen_project(app.projectwin)!=NULL); } }
     if(*error) { if(c) c->pending=0; if(wait->kind==RpcSubmit) { if(c) { c->running=0; resume(c); } notice("Send result was uncertain. The message was not retried; reconnect to check the chat."); }
@@ -521,7 +544,7 @@ static void result(Pending *wait,const cJSON *r,const char *error) {
         int i; c->pending=0; for(i=0;i<cJSON_GetArraySize(c->attachments);i++) if(!strcmp(js(cJSON_GetArrayItem(c->attachments,i),"path"),wait->path)) { cJSON_DeleteItemFromArray(c->attachments,i); break; }
         schedule_save(); if(wait->confirmed&&cJSON_GetArraySize(c->attachments)) remove_attachment(c,cJSON_GetArraySize(c->attachments)-1,1);
     } break;
-    case RpcModels: cJSON_Delete(app.models); app.models=cJSON_Duplicate(r,1); app.models_pending=0; PostMessageW(app.window,WM_COMMAND,IdModel,0); break;
+    case RpcModels: cJSON_Delete(app.models); app.models=cJSON_Duplicate(r,1); app.models_pending=0; PostMessageW(app.window,WM_COMMAND,app.server_model==2?IdTitleModel:app.server_model?IdServerModel:IdModel,0); break;
     case RpcProjects: cJSON_Delete(app.projects); app.projects=cJSON_Duplicate(r,1); app.projects_supported=1; project_choices(); break;
     case RpcProjectTree: cJSON_Delete(app.project_tree); app.project_tree=cJSON_Duplicate(r,1); tree_metadata(); project_choices(); sidebar(); schedule_save(); break;
     case RpcProjectCreate: case RpcProjectAdd:
@@ -561,17 +584,44 @@ static void on_net(NetMessage *m) {
         { cJSON *p=params(); cJSON_AddBoolToObject(p,"server_requests",1); rpc("client.capabilities",p,RpcCaps,NULL); }
         listchats(); for(i=0;i<app.count;i++) if(app.chats[i]->running || app.chats[i]==app.current) { app.chats[i]->pending=0; resume(app.chats[i]); }
         rpc("projects.list",params(),RpcProjects,NULL); project_tree(); { cJSON *p=params(); cJSON_AddStringToObject(p,"key","provider"); rpc("config.get",p,RpcDefaultModel,NULL); }
+        app.cron_disabled=0; poll_cron(); net_rest(app.net,"/api/config",RestConfig,NULL);
         if(app.serverwin) { server_choices(); DestroyWindow(app.serverwin); }
         { char title[1400]; snprintf(title,sizeof(title),"lcb-hermes - %s",*js(app.profile,"name")?js(app.profile,"name"):app.url); settext(app.window,title); }
         save(); sidebar(); render(); poll_stats();
     } else if(m->kind==NetOffline) {
-        Pending *p; size_t i; app.connected=app.connecting=0; app.models_pending=app.list_pending=app.list_again=app.project_pending=0;
+        Pending *p; size_t i; app.connected=app.connecting=0; app.models_pending=app.list_pending=app.list_again=app.project_pending=app.tree_pending=app.tree_again=0;
         while((p=app.pending)!=NULL) { app.pending=p->next; if(p->chat) p->chat->pending=0; free(p); }
         for(i=0;i<app.count;i++) app.chats[i]->pending=0;
         notice(m->error); status_stats();
+        if(!IsWindowVisible(app.window)) shell_notify("Hermes disconnected","Open lcb-hermes and reconnect to receive replies and cron notifications.",NULL,0);
     } else if(m->kind==NetFrame) { if(app.connected) frame(m->json); }
     else if(m->kind==NetRest) {
-        if(m->tag==RestStats) { app.stats_pending=0; if(app.connected&&!strcmp(m->url,app.url)) { cJSON_Delete(app.stats); app.stats=m->json?cJSON_Duplicate(m->json,1):NULL; app.stats_at=GetTickCount64(); status_stats(); } }
+        if(m->tag>=100) admin_result(m);
+        else if(m->tag==RestConfig) {
+            if(app.connected&&!strcmp(m->url,app.url)&&!strcmp(m->user,app.user)&&cJSON_IsObject(m->json)) {
+                copytext(app.server_cwd,sizeof(app.server_cwd),js(cJSON_GetObjectItemCaseSensitive(m->json,"terminal"),"cwd"));
+                if(app.profile) put(app.profile,"server_cwd",app.server_cwd); sidebar(); project_choices(); schedule_save();
+            }
+        } else if(m->tag==RestCron) {
+            app.cron_pending=0;
+            if(app.connected&&!strcmp(m->url,app.url)&&!strcmp(m->user,app.user)) {
+                if(cJSON_IsArray(m->json)) cron_snapshot(m->json);
+                else { app.cron_disabled=1; notice("Cron notifications unavailable. Reconnect to retry; chat notifications still work."); }
+            }
+        } else if(m->tag==RestSetDefault) {
+            app.default_pending=0;
+            if(app.connected&&!strcmp(m->url,app.url)&&!strcmp(m->user,app.user)) {
+                if(jb(m->json,"confirm_required")&&app.default_request&&!jb(app.default_request,"confirm_expensive_model")) {
+                    wchar_t *message=wide(js(m->json,"confirm_message"));
+                    if(message&&MessageBoxW(app.window,message,L"Model selection",MB_OKCANCEL|MB_DEFBUTTON2|MB_ICONQUESTION)==IDOK) {
+                        cJSON_AddBoolToObject(app.default_request,"confirm_expensive_model",1);
+                        app.default_pending=net_post(app.net,"/api/model/set",app.default_request,RestSetDefault,NULL);
+                    } free(message); if(!app.default_pending) notice("Model setting was not changed.");
+                } else if(jb(m->json,"ok")) { cJSON *p=params(); cJSON_AddStringToObject(p,"key","provider"); rpc("config.get",p,RpcDefaultModel,NULL); notice(app.default_request&&!strcmp(js(app.default_request,"scope"),"auxiliary")?"Automatic title model saved.":"Server default saved. New sessions will use it."); }
+                else notice(*m->error?m->error:"Could not confirm the server model change. Refresh before retrying.");
+            }
+            if(!app.default_pending) { cJSON_Delete(app.default_request); app.default_request=NULL; }
+        } else if(m->tag==RestStats) { app.stats_pending=0; if(app.connected&&!strcmp(m->url,app.url)) { cJSON_Delete(app.stats); app.stats=m->json?cJSON_Duplicate(m->json,1):NULL; app.stats_at=GetTickCount64(); status_stats(); } }
         else if(m->tag==RestUpload) { Upload *u=m->context; app.uploads--; if(u) {
             if(u->chat&&m->json && *js(m->json,"path")) { cJSON *a=cJSON_CreateObject(); char *local=utf8(u->path),*name=utf8(wcsrchr(u->path,L'\\')?wcsrchr(u->path,L'\\')+1:u->path); const wchar_t *ext=wcsrchr(u->path,L'.');
                 cJSON_AddStringToObject(a,"path",js(m->json,"path")); cJSON_AddStringToObject(a,"local",local); cJSON_AddStringToObject(a,"name",name); cJSON_AddStringToObject(a,"mime",ext&&(!_wcsicmp(ext,L".png")||!_wcsicmp(ext,L".jpg")||!_wcsicmp(ext,L".jpeg")||!_wcsicmp(ext,L".webp")||!_wcsicmp(ext,L".gif"))?"image/local":"application/octet-stream");
@@ -692,22 +742,21 @@ static void resource_meter(HDC dc,int y,int width,int icon,const char *label,dou
     if(!compact) panel_text(dc,30,y+32,width-40,detail,app.normal,app.muted);
 }
 static void draw_monitor(HWND w,HDC dc) {
-    RECT r; int width,height,compact,step,start,model_y; char text[512],detail[128];
+    RECT r; int width,height,compact,step,start; char text[512],detail[128];
     const cJSON *s=app.stats,*memory=cJSON_GetObjectItemCaseSensitive(s,"memory"),*disk=cJSON_GetObjectItemCaseSensitive(s,"disk"),*process=cJSON_GetObjectItemCaseSensitive(s,"process");
     GetClientRect(w,&r); FillRect(dc,&r,app.paper); width=MulDiv(r.right,96,app.dpi); height=MulDiv(r.bottom,96,app.dpi); compact=height<285; step=compact?43:55; start=compact?57:70;
     if(app.icons) ImageList_Draw(app.icons,ClassicOutput,dc,px(9),px(10),ILD_TRANSPARENT);
     snprintf(text,sizeof(text),"Hermes%s%s",app.connected&&s?" ":"",app.connected&&s?js(s,"hermes_version"):""); panel_text(dc,32,10,width-42,text,app.heading,app.ink);
     if(!app.connected||!s) { panel_text(dc,10,37,width-20,app.connecting?"Connecting...":app.connected?"Waiting for host statistics":"Offline",app.normal,app.muted);
-        about_text(dc,10,75,width-20,70,L"Connect to Hermes to see server resources and the configured model.",app.normal,app.muted); return;
+        about_text(dc,10,75,width-20,70,L"Connect to Hermes to see server resources.",app.normal,app.muted); return;
     }
     panel_text(dc,10,32,width-20,js(s,"hostname"),app.normal,app.muted);
     if(!compact) { snprintf(text,sizeof(text),"%s / %s",js(s,"os"),js(s,"arch")); panel_text(dc,10,49,width-20,text,app.normal,app.muted); }
     snprintf(detail,sizeof(detail),"%.0f logical CPUs",number(s,"cpu_count")); resource_meter(dc,start,width,ClassicEngine,"CPU",number(s,"cpu_percent"),cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(s,"cpu_percent"))?100:0,detail,compact);
     snprintf(detail,sizeof(detail),"%.1f / %.1f GiB",number(memory,"used")/1073741824.0,number(memory,"total")/1073741824.0); resource_meter(dc,start+step,width,ClassicModel,"Memory",number(memory,"used"),number(memory,"total"),detail,compact);
     snprintf(detail,sizeof(detail),"%.1f / %.1f GiB",number(disk,"used")/1073741824.0,number(disk,"total")/1073741824.0); resource_meter(dc,start+step*2,width,ClassicFolder,"Disk",number(disk,"used"),number(disk,"total"),detail,compact);
-    model_y=height-(compact?42:59);
+
     if(height>=330) { snprintf(text,sizeof(text),"Process: %.1f MiB / %.0f threads",number(process,"rss")/1048576.0,number(process,"num_threads")); panel_text(dc,10,242,width-20,text,app.normal,app.muted); }
-    panel_text(dc,10,model_y,width-20,"Server default model",app.heading,app.ink); panel_text(dc,10,model_y+19,width-20,*app.default_model?app.default_model:"Supplied by Hermes",app.normal,app.ink);
     if(!compact) { snprintf(text,sizeof(text),"Host readings / updated %llu s ago",(unsigned long long)((GetTickCount64()-app.stats_at)/1000)); panel_text(dc,10,height-19,width-20,text,app.normal,app.muted); }
 }
 static LRESULT CALLBACK monitor_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
@@ -727,7 +776,7 @@ static void draw_about(HDC dc) {
     RECT r={px(14),px(14),px(498),px(82)};
     SetDCBrushColor(dc,app.accent); FillRect(dc,&r,(HBRUSH)GetStockObject(DC_BRUSH)); classic_edge(dc,r,1);
     DrawIconEx(dc,px(28),px(32),LoadIconW(app.instance,MAKEINTRESOURCEW(101)),px(24),px(24),0,NULL,DI_NORMAL);
-    about_text(dc,66,23,290,28,L"lcb-hermes",app.brandfont,app.ink); about_text(dc,436,28,48,20,L"0.4.6",app.normal,app.muted);
+    about_text(dc,66,23,290,28,L"lcb-hermes",app.brandfont,app.ink); about_text(dc,394,28,90,20,L"0.50-pre1",app.normal,app.muted);
     about_text(dc,66,55,408,20,L"A classic desktop client for Hermes",app.normal,app.ink);
     r=(RECT){px(18),px(104),px(494),px(244)}; FillRect(dc,&r,(HBRUSH)GetStockObject(WHITE_BRUSH)); classic_edge(dc,r,0);
     if(app.nouslogo) { HDC source=CreateCompatibleDC(dc); HGDIOBJ old=SelectObject(source,app.nouslogo); SetStretchBltMode(dc,HALFTONE); SetBrushOrgEx(dc,0,0,NULL); StretchBlt(dc,px(32),px(122),px(104),px(104),source,0,0,app.logo_width,app.logo_height,SRCCOPY); SelectObject(source,old); DeleteDC(source); }
@@ -769,8 +818,8 @@ static void show_about(HWND owner) {
     ShowWindow(app.aboutwin,SW_SHOW); SetFocus(GetDlgItem(app.aboutwin,IDCANCEL));
 }
 static void connect_to(const char *url,const char *user,const char *password,int allow,const char *cookie) {
-    Pending *p; if(app.connecting) return; save(); app.connected=0; app.connecting=1;
-    app.list_pending=app.list_again=0; KillTimer(app.window,IdList); cJSON_Delete(app.stats); app.stats=NULL; app.stats_at=0; status_stats();
+    Pending *p; if(app.connecting) return; admin_close(); save(); app.connected=0; app.connecting=1;
+    app.list_pending=app.list_again=app.tree_pending=app.tree_again=0; KillTimer(app.window,IdList); cJSON_Delete(app.stats); app.stats=NULL; app.stats_at=0; status_stats();
     while((p=app.pending)!=NULL) { app.pending=p->next; if(p->chat) p->chat->pending=0; free(p); }
     app.notice[0]=0; net_connect(app.net,url,user,password,allow,cookie); controls();
 }
@@ -809,7 +858,8 @@ static LRESULT CALLBACK server_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
         h=child(w,L"STATIC",L"User",0,0); move(h,18,273,64,23); h=child(w,L"EDIT",L"",WS_TABSTOP|ES_AUTOHSCROLL,503); move(h,88,269,168,27);
         h=child(w,L"STATIC",L"Password",0,0); move(h,269,273,66,23); h=child(w,L"EDIT",L"",WS_TABSTOP|ES_PASSWORD|ES_AUTOHSCROLL,504); move(h,340,269,162,27);
         h=child(w,L"BUTTON",L"Allow HTTP on a private network",WS_TABSTOP|BS_AUTOCHECKBOX,506); move(h,88,306,360,25);
-        h=child(w,L"STATIC",L"Windows protects saved sign-ins for your user account.",0,0); move(h,18,346,484,22);
+        h=child(w,L"BUTTON",L"Server default model...",WS_TABSTOP|BS_OWNERDRAW,514); move(h,18,340,218,28); EnableWindow(h,app.connected);
+        h=child(w,L"BUTTON",L"Settings and providers...",WS_TABSTOP|BS_OWNERDRAW,515); move(h,248,340,254,28); EnableWindow(h,app.connected);
         h=child(w,L"STATIC",L"",0,508); move(h,18,373,484,36);
         h=child(w,L"BUTTON",L"Connect",WS_TABSTOP|BS_OWNERDRAW,505); move(h,276,425,116,29);
         h=child(w,L"BUTTON",L"Close",WS_TABSTOP|BS_OWNERDRAW,IDCANCEL); move(h,402,425,100,29);
@@ -817,6 +867,8 @@ static LRESULT CALLBACK server_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
     }
     case WM_COMMAND:
         switch(LOWORD(wp)) {
+        case 514: SendMessageW(app.window,WM_COMMAND,IdServerModel,0); break;
+        case 515: show_admin(); break;
         case 512: ListView_SetItemState(GetDlgItem(w,510),-1,0,LVIS_SELECTED|LVIS_FOCUSED); server_edit(NULL); SetFocus(GetDlgItem(w,511)); break;
         case 513: {
             cJSON *p=server_selected();
@@ -891,7 +943,7 @@ static int folder_choice(const char *label,const char *path) {
 }
 static void project_choices(void) {
     const cJSON *p,*f; int index=0,selected=0; HWND combo=app.workspace,projects=app.projectwin?GetDlgItem(app.projectwin,601):NULL;
-    SendMessageW(combo,CB_RESETCONTENT,0,0); SendMessageW(combo,CB_ADDSTRING,0,(LPARAM)L"Server default folder");
+    SendMessageW(combo,CB_RESETCONTENT,0,0); SendMessageW(combo,CB_ADDSTRING,0,(LPARAM)L"Default workspace");
     if(projects) SendMessageW(projects,CB_RESETCONTENT,0,0);
     cJSON_ArrayForEach(p,cJSON_GetObjectItemCaseSensitive(app.projects,"projects")) {
         if(jb(p,"archived")) { index++; continue; }
@@ -909,7 +961,7 @@ static void project_choices(void) {
 static void choose_workspace(const char *path) {
     if(path!=app.newcwd) copytext(app.newcwd,sizeof(app.newcwd),path); if(app.profile) put(app.profile,"workspace",app.newcwd);
     /* A resumed chat keeps its server cwd; a fresh draft can still choose its folder. */
-    if(app.current && !*app.current->id && !*app.current->stored) { copytext(app.current->cwd,sizeof(app.current->cwd),path); sidebar(); }
+    if(app.current && !*app.current->id && !*app.current->stored) { copytext(app.current->cwd,sizeof(app.current->cwd),*path?path:app.server_cwd); sidebar(); }
     project_choices(); controls(); schedule_save();
 }
 static void workspace_choice(void) {
@@ -997,21 +1049,21 @@ static void model_details(void) {
         if(i&&(!reasoning||((!strcmp(slug,"openai-codex")||!strcmp(slug,"openai"))&&((i==5&&!modern)||(i==6&&no_disable)||i>=7)))) continue;
         index=SendMessageW(effort,CB_ADDSTRING,0,(LPARAM)(i==0&&c&&!*c->stored?L"Server default":levels[i])); SendMessageW(effort,CB_SETITEMDATA,(WPARAM)index,i); if(!strcmp(old,values[i])) picked=(int)index;
     }
-    SendMessageW(effort,CB_SETCURSEL,picked,0); EnableWindow(effort,reasoning);
-    snprintf(label,sizeof(label),"%s%s%s",reasoning?"Reasoning available":"No reasoning control reported",c&&*c->stored?". Changes apply to this chat.":". Applies when this chat starts.",c&&c->running?" Model changes take effect next turn.":""); settext(GetDlgItem(app.modelwin,705),label);
-    EnableWindow(GetDlgItem(app.modelwin,713),app.connected&&c&&!c->pending&&(*c->id||!*c->stored)&&ListView_GetNextItem(GetDlgItem(app.modelwin,703),-1,LVNI_SELECTED)>=0);
+    SendMessageW(effort,CB_SETCURSEL,picked,0); EnableWindow(effort,reasoning&&!app.server_model);
+    snprintf(label,sizeof(label),"%s%s%s",reasoning?"Reasoning available":"No reasoning control reported",c&&*c->stored?". Changes apply to this chat.":". Applies when this chat starts.",c&&c->running?" Model changes take effect next turn.":""); if(app.server_model==2) snprintf(label,sizeof(label),"Used only for automatic titles. Choose a model that supports disabled reasoning on this server version."); else if(app.server_model) snprintf(label,sizeof(label),"Applies to new sessions on %.420s. Existing chats keep their model.",app.url); settext(GetDlgItem(app.modelwin,705),label);
+    EnableWindow(GetDlgItem(app.modelwin,713),app.connected&&!app.default_pending&&(app.server_model?*model_selected()!=0:c&&!c->pending&&(*c->id||!*c->stored))&&ListView_GetNextItem(GetDlgItem(app.modelwin,703),-1,LVNI_SELECTED)>=0);
 }
 static void model_fill(void) {
     HWND list=GetDlgItem(app.modelwin,703); const cJSON *provider=model_provider(),*m,*caps,*price; char *filter=gettext(GetDlgItem(app.modelwin,702)); wchar_t *query=wide(filter); int index=0,selected=-1; Chat *c=app.model_chat;
     free(filter); SendMessageW(list,WM_SETREDRAW,FALSE,0); ListView_DeleteAllItems(list);
-    { LVITEMW item={0}; wchar_t label[260]; item.mask=LVIF_TEXT|LVIF_PARAM|LVIF_IMAGE; item.lParam=-1; item.iImage=ClassicModel; swprintf(label,260,L"Server default (%hs)",app.default_model); item.pszText=label; if(!query||!*query||StrStrIW(label,query)) { ListView_InsertItem(list,&item); if(!c||!*c->model) selected=0; } }
+    if(!app.server_model) { LVITEMW item={0}; wchar_t label[260]; item.mask=LVIF_TEXT|LVIF_PARAM|LVIF_IMAGE; item.lParam=-1; item.iImage=ClassicModel; swprintf(label,260,L"Server default (%hs)",app.default_model); item.pszText=label; if(!query||!*query||StrStrIW(label,query)) { ListView_InsertItem(list,&item); if(!c||!*c->model) selected=0; } }
     cJSON_ArrayForEach(m,cJSON_GetObjectItemCaseSensitive(provider,"models")) {
         wchar_t *name,*details; char detail[360]; LVITEMW item={0}; int row;
         if(!cJSON_IsString(m)) { index++; continue; } name=wide(m->valuestring);
         if(query&&*query&&!StrStrIW(name,query)) { free(name); index++; continue; }
         caps=cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(provider,"capabilities"),m->valuestring); price=cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(provider,"pricing"),m->valuestring);
         snprintf(detail,sizeof(detail),"%s%s%s%s",jb(caps,"reasoning")?"Reasoning":"",*js(price,"input")?"  /  ":"",js(price,"input"),*js(price,"input")?" in":""); details=wide(detail);
-        item.mask=LVIF_TEXT|LVIF_PARAM|LVIF_IMAGE; item.iItem=ListView_GetItemCount(list); item.pszText=name; item.lParam=index++; item.iImage=ClassicModel; row=ListView_InsertItem(list,&item); ListView_SetItemText(list,row,1,details); if(c&&!strcmp(c->model,m->valuestring)) selected=row; free(details); free(name);
+        item.mask=LVIF_TEXT|LVIF_PARAM|LVIF_IMAGE; item.iItem=ListView_GetItemCount(list); item.pszText=name; item.lParam=index++; item.iImage=ClassicModel; row=ListView_InsertItem(list,&item); ListView_SetItemText(list,row,1,details); if((c&&!strcmp(c->model,m->valuestring))||(app.server_model&&!strcmp(app.default_model,m->valuestring))) selected=row; free(details); free(name);
     }
     if(selected<0&&ListView_GetItemCount(list)>0) selected=0; if(selected>=0) { ListView_SetItemState(list,selected,LVIS_SELECTED|LVIS_FOCUSED,LVIS_SELECTED|LVIS_FOCUSED); ListView_EnsureVisible(list,selected,FALSE); }
     SendMessageW(list,WM_SETREDRAW,TRUE,0); InvalidateRect(list,NULL,TRUE); free(query); model_details();
@@ -1019,8 +1071,8 @@ static void model_fill(void) {
 static LRESULT CALLBACK model_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
     switch(msg) {
     case WM_CREATE: {
-        HWND h; const cJSON *p; int n=0,selected=0; LVCOLUMNW col={0}; app.modelwin=w; app.model_chat=app.current; app.model_dirty=0;
-        h=child(w,L"STATIC",L"Model for this conversation",0,0); move(h,18,14,590,22); SendMessageW(h,WM_SETFONT,(WPARAM)app.heading,0);
+        HWND h; const cJSON *p; int n=0,selected=0; LVCOLUMNW col={0}; app.modelwin=w; app.model_chat=app.server_model?NULL:app.current; app.model_dirty=0;
+        h=child(w,L"STATIC",app.server_model==2?L"Model for automatic chat titles":app.server_model?L"Default model on the connected server":L"Model for this conversation",0,0); move(h,18,14,590,22); SendMessageW(h,WM_SETFONT,(WPARAM)app.heading,0);
         h=child(w,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST|WS_VSCROLL,701); move(h,18,47,268,230);
         cJSON_ArrayForEach(p,cJSON_GetObjectItemCaseSensitive(app.models,"providers")) { if(jb(p,"authenticated")||jb(p,"is_current")) { wchar_t *name=wide(*js(p,"name")?js(p,"name"):js(p,"slug")); LRESULT i=SendMessageW(h,CB_ADDSTRING,0,(LPARAM)name); free(name); SendMessageW(h,CB_SETITEMDATA,(WPARAM)i,n); if((app.model_chat&&*app.model_chat->provider&&!strcmp(js(p,"slug"),app.model_chat->provider))||((!app.model_chat||!*app.model_chat->provider)&&jb(p,"is_current"))) selected=(int)i; } n++; }
         SendMessageW(h,CB_SETCURSEL,selected,0);
@@ -1029,7 +1081,7 @@ static LRESULT CALLBACK model_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
         col.mask=LVCF_TEXT|LVCF_WIDTH; col.cx=px(330); col.pszText=L"Model"; ListView_InsertColumn(h,0,&col); col.cx=px(230); col.pszText=L"Capabilities / input price"; ListView_InsertColumn(h,1,&col);
         h=child(w,L"STATIC",L"Reasoning effort",0,0); move(h,18,375,120,24); h=child(w,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST|WS_VSCROLL,704); move(h,144,371,214,250);
         h=child(w,L"STATIC",L"",0,705); move(h,18,414,590,40);
-        h=child(w,L"BUTTON",L"Apply to chat",WS_TABSTOP|BS_OWNERDRAW,713); move(h,356,466,140,29); h=child(w,L"BUTTON",L"Cancel",WS_TABSTOP|BS_OWNERDRAW,IDCANCEL); move(h,506,466,102,29);
+        h=child(w,L"BUTTON",app.server_model==2?L"Save title model":app.server_model?L"Save default":L"Apply to chat",WS_TABSTOP|BS_OWNERDRAW,713); move(h,356,466,140,29); h=child(w,L"BUTTON",L"Cancel",WS_TABSTOP|BS_OWNERDRAW,IDCANCEL); move(h,506,466,102,29);
         model_fill(); break;
     }
     case WM_NOTIFY: if(((NMHDR *)lp)->idFrom==703&&((NMHDR *)lp)->code==LVN_ITEMCHANGED) model_details(); if(((NMHDR *)lp)->idFrom==703&&((NMHDR *)lp)->code==NM_DBLCLK) SendMessageW(w,WM_COMMAND,713,0); return 0;
@@ -1040,6 +1092,11 @@ static LRESULT CALLBACK model_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
         else if(LOWORD(wp)==713) {
             static const char *efforts[]={"","low","medium","high","xhigh","max","none","minimal","ultra"};
             Chat *c=app.model_chat; const cJSON *provider=model_provider(); const char *name=model_selected(); LRESULT i=SendMessageW(GetDlgItem(w,704),CB_GETCURSEL,0,0),data=SendMessageW(GetDlgItem(w,704),CB_GETITEMDATA,(WPARAM)i,0); char effort[32]="",model[160],slug[160];
+            if(app.server_model) {
+                cJSON *body=params(); if(!app.connected||app.default_pending||!*name) { cJSON_Delete(body); return 0; }
+                cJSON_AddStringToObject(body,"scope",app.server_model==2?"auxiliary":"main"); if(app.server_model==2) cJSON_AddStringToObject(body,"task","title_generation"); cJSON_AddStringToObject(body,"provider",js(provider,"slug")); cJSON_AddStringToObject(body,"model",name);
+                if(net_post(app.net,"/api/model/set",body,RestSetDefault,NULL)) { app.default_pending=1; cJSON_Delete(app.default_request); app.default_request=body; DestroyWindow(w); notice("Saving server model assignment..."); } else { cJSON_Delete(body); notice("Could not queue the model change."); } return 0;
+            }
             if(!c||!app.connected||c->pending||app.current!=c) { settext(GetDlgItem(w,705),"Select this chat again before applying settings."); return 0; }
             if(data>0&&data<9) copytext(effort,sizeof(effort),efforts[data]); copytext(model,sizeof(model),*name?name:app.default_model); copytext(slug,sizeof(slug),*name?js(provider,"slug"):js(app.models,"provider"));
             if(!*c->stored) { copytext(c->model,sizeof(c->model),*name?model:""); copytext(c->provider,sizeof(c->provider),*name?slug:""); copytext(c->reasoning,sizeof(c->reasoning),effort); schedule_save(); controls(); DestroyWindow(w); }
@@ -1047,7 +1104,7 @@ static LRESULT CALLBACK model_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
         } else if(LOWORD(wp)==IDCANCEL) DestroyWindow(w); return 0;
     case WM_DRAWITEM: draw_button((DRAWITEMSTRUCT *)lp); return TRUE;
     case WM_CLOSE: DestroyWindow(w); return 0;
-    case WM_DESTROY: app.modelwin=NULL; app.model_chat=NULL; cJSON_Delete(app.models); app.models=NULL; SetFocus(app.prompt); return 0;
+    case WM_DESTROY: app.modelwin=NULL; app.model_chat=NULL; app.server_model=0; cJSON_Delete(app.models); app.models=NULL; SetFocus(app.prompt); return 0;
     case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: return color_control(msg,wp,lp);
     case WM_ERASEBKGND: { RECT r; GetClientRect(w,&r); FillRect((HDC)wp,&r,app.face); return 1; }
     }
@@ -1055,8 +1112,8 @@ static LRESULT CALLBACK model_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
 }
 static void models(void) {
     if(app.modelwin) { SetForegroundWindow(app.modelwin); return; } if(app.models_pending) return;
-    if(!app.models) { cJSON *p=params(); cJSON_AddBoolToObject(p,"include_unconfigured",0); if(app.current&&*app.current->id) cJSON_AddStringToObject(p,"session_id",app.current->id); app.models_pending=1; rpc("model.options",p,RpcModels,NULL); return; }
-    app.modelwin=CreateWindowExW(WS_EX_DLGMODALFRAME,L"LCBHermesModels",L"Choose model",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU,0,0,px(644),px(544),app.window,NULL,app.instance,NULL);
+    if(!app.models) { cJSON *p=params(); cJSON_AddBoolToObject(p,"include_unconfigured",0); if(!app.server_model&&app.current&&*app.current->id) cJSON_AddStringToObject(p,"session_id",app.current->id); app.models_pending=1; rpc("model.options",p,RpcModels,NULL); return; }
+    app.modelwin=CreateWindowExW(WS_EX_DLGMODALFRAME,L"LCBHermesModels",app.server_model==2?L"Automatic title model":app.server_model?L"Server default model":L"Choose model",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU,0,0,px(644),px(544),app.window,NULL,app.instance,NULL);
     { RECT r; GetWindowRect(app.window,&r); SetWindowPos(app.modelwin,NULL,r.left+px(70),r.top+px(45),0,0,SWP_NOSIZE|SWP_NOZORDER); } ShowWindow(app.modelwin,SW_SHOW); SetFocus(GetDlgItem(app.modelwin,702));
 }
 
@@ -1119,12 +1176,16 @@ static LRESULT CALLBACK prompt_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp,UINT_PTR
     if(msg==WM_KEYDOWN&&wp==VK_RETURN&&GetKeyState(VK_CONTROL)<0) { submit(); return 0; }
     return DefSubclassProc(w,msg,wp,lp);
 }
+#include "server_panel.inc"
+
 static HMENU workbench_menu(void) {
     HMENU bar=CreateMenu(),file=CreatePopupMenu(),view=CreatePopupMenu(),chat=CreatePopupMenu(),server=CreatePopupMenu(),help=CreatePopupMenu();
     AppendMenuW(file,MF_STRING,IdNew,L"&New chat\tCtrl+N"); AppendMenuW(file,MF_SEPARATOR,0,NULL); AppendMenuW(file,MF_STRING,IdExit,L"E&xit");
     AppendMenuW(chat,MF_STRING,IdRename,L"&Rename chat..."); AppendMenuW(chat,MF_STRING,IdExport,L"&Export chat..."); AppendMenuW(chat,MF_STRING,IdDelete,L"&Delete chat..."); AppendMenuW(chat,MF_SEPARATOR,0,NULL); AppendMenuW(chat,MF_STRING,IdRequest,L"&Answer Hermes request..."); AppendMenuW(chat,MF_STRING,IdRemoveAttachment,L"Clear draft attachments");
     AppendMenuW(view,MF_STRING|MF_CHECKED,IdMonitor,L"&Server monitor"); AppendMenuW(view,MF_STRING,IdWider,L"Wider chat list"); AppendMenuW(view,MF_STRING,IdNarrower,L"Narrower chat list"); AppendMenuW(view,MF_SEPARATOR,0,NULL); AppendMenuW(view,MF_STRING,IdExpand,L"&Expand folders"); AppendMenuW(view,MF_STRING,IdCollapse,L"&Collapse folders");
     AppendMenuW(server,MF_STRING,IdManageServers,L"&Server manager..."); AppendMenuW(server,MF_STRING,IdAddServer,L"&Add server..."); AppendMenuW(server,MF_STRING,IdReconnect,L"&Reconnect\tCtrl+R"); AppendMenuW(server,MF_STRING,IdRefresh,L"&Refresh chats and workspaces"); AppendMenuW(server,MF_STRING,IdProjects,L"&Workspaces and folders...");
+    AppendMenuW(view,MF_SEPARATOR,0,NULL); AppendMenuW(view,MF_STRING|(app.min_tray?MF_CHECKED:0),IdMinTray,L"Minimize to tray"); AppendMenuW(view,MF_STRING|(app.notifications?MF_CHECKED:0),IdNotify,L"Reply and cron notifications");
+    AppendMenuW(server,MF_SEPARATOR,0,NULL); AppendMenuW(server,MF_STRING,IdServerModel,L"Default model on server..."); AppendMenuW(server,MF_STRING,IdDashboard,L"Settings and providers...");
     AppendMenuW(help,MF_STRING,IdAbout,L"&About lcb-hermes...");
     AppendMenuW(bar,MF_POPUP,(UINT_PTR)file,L"&File"); AppendMenuW(bar,MF_POPUP,(UINT_PTR)view,L"&View"); AppendMenuW(bar,MF_POPUP,(UINT_PTR)chat,L"&Chat"); AppendMenuW(bar,MF_POPUP,(UINT_PTR)server,L"&Server"); AppendMenuW(bar,MF_POPUP,(UINT_PTR)help,L"&Help"); return bar;
 }
@@ -1159,7 +1220,52 @@ static void paint_workbench(HDC dc) {
     if(buffer&&bitmap) { old=SelectObject(buffer,bitmap); draw_workbench(buffer); BitBlt(dc,0,0,app.width,app.height,buffer,0,0,SRCCOPY); SelectObject(buffer,old); } else draw_workbench(dc);
     if(bitmap) DeleteObject(bitmap); if(buffer) DeleteDC(buffer);
 }
+
+#define SHELL_MESSAGE (WM_APP + 21)
+static int shell_add(void) {
+    NOTIFYICONDATAW n={0}; if(app.shell_icon) return 1;
+    n.cbSize=sizeof(n); n.hWnd=app.window; n.uID=1; n.uFlags=NIF_ICON|NIF_MESSAGE|NIF_TIP;
+    n.uCallbackMessage=SHELL_MESSAGE; n.hIcon=LoadIconW(app.instance,MAKEINTRESOURCEW(101));
+    wcscpy(n.szTip,L"lcb-hermes"); app.shell_icon=Shell_NotifyIconW(NIM_ADD,&n)!=0; return app.shell_icon;
+}
+static void shell_remove(void) { NOTIFYICONDATAW n={0}; n.cbSize=sizeof(n); n.hWnd=app.window; n.uID=1; if(app.shell_icon) Shell_NotifyIconW(NIM_DELETE,&n); app.shell_icon=0; }
+static void shell_restore(void) { ShowWindow(app.window,SW_RESTORE); SetForegroundWindow(app.window); }
+static void show_scheduled(void) {
+    size_t i; SetWindowTextW(app.search,L""); sidebar();
+    for(i=0;i<app.ngroups;i++) if(!strcmp(app.groups[i].path,"@cron")) { TreeView_Expand(app.tree,app.groups[i].item,TVE_EXPAND); TreeView_EnsureVisible(app.tree,app.groups[i].item); break; }
+    if(app.connected) listchats(); notice("Cron results appear under Scheduled runs. Open a run to read it.");
+}
+static void shell_notify(const char *title,const char *body,Chat *c,int cron) {
+    NOTIFYICONDATAW n={0}; wchar_t *t,*b; if(!app.notifications||!shell_add()) return;
+    n.cbSize=sizeof(n); n.hWnd=app.window; n.uID=1; n.uFlags=NIF_INFO; n.dwInfoFlags=NIIF_INFO;
+    t=wide(title); b=wide(body); if(t) wcsncpy(n.szInfoTitle,t,63); if(b) wcsncpy(n.szInfo,b,255); free(t); free(b);
+    copytext(app.notification_chat,sizeof(app.notification_chat),c?c->key:""); app.notification_cron=cron;
+    Shell_NotifyIconW(NIM_MODIFY,&n);
+}
+static void poll_cron(void) {
+    if(app.connected&&app.notifications&&!app.cron_pending&&!app.cron_disabled) { app.cron_pending=1; net_rest(app.net,"/api/cron/jobs",RestCron,NULL); }
+}
+/* First snapshot establishes a baseline. Persist only completion watermarks, not job prompts/output. */
+static void cron_snapshot(const cJSON *jobs) {
+    const cJSON *job,*old=cJSON_GetObjectItemCaseSensitive(app.profile,"cron_seen"); cJSON *next=cJSON_CreateArray();
+    int count=0; const char *name="Cron job",*status="finished";
+    if(!app.profile||!cJSON_IsArray(jobs)) { cJSON_Delete(next); return; }
+    cJSON_ArrayForEach(job,jobs) {
+        const cJSON *prior=NULL,*v,*stamp=cJSON_GetObjectItemCaseSensitive(job,"last_run_at"); cJSON *entry;
+        const char *state=js(job,"last_status"); int completed=*state&&strcmp(state,"running")&&strcmp(state,"pending")&&strcmp(state,"queued");
+        if(!*js(job,"id")) continue;
+        cJSON_ArrayForEach(v,old) if(!strcmp(js(v,"id"),js(job,"id"))&&!strcmp(js(v,"profile"),js(job,"profile"))) { prior=v; break; }
+        if(completed&&stamp&&!cJSON_IsNull(stamp)&&(!cJSON_IsString(stamp)||*stamp->valuestring)&&cJSON_IsArray(old)&&
+           (!prior||!cJSON_Compare(stamp,cJSON_GetObjectItemCaseSensitive(prior,"last_run_at"),1)||strcmp(state,js(prior,"last_status")))) { count++; name=*js(job,"name")?js(job,"name"):"Cron job"; status=state; }
+        entry=cJSON_CreateObject(); put(entry,"id",js(job,"id")); put(entry,"profile",js(job,"profile")); put(entry,"last_status",state);
+        if(stamp) cJSON_AddItemToObject(entry,"last_run_at",cJSON_Duplicate(stamp,1)); cJSON_AddItemToArray(next,entry);
+    }
+    if(cJSON_Compare(old,next,1)) { cJSON_Delete(next); return; }
+    cJSON_DeleteItemFromObjectCaseSensitive(app.profile,"cron_seen"); cJSON_AddItemToObject(app.profile,"cron_seen",next); schedule_save();
+    if(count) { char body[256]; if(count==1) snprintf(body,sizeof(body),"%.160s: %.40s. Open Scheduled runs to review.",name,status); else snprintf(body,sizeof(body),"%d cron jobs have new results. Open Scheduled runs to review.",count); shell_notify("Hermes cron",body,NULL,1); }
+}
 static LRESULT CALLBACK window_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
+    if(app.taskbar_created&&msg==app.taskbar_created) { app.shell_icon=0; if((app.min_tray||app.notifications)&&!shell_add()&&!IsWindowVisible(w)) shell_restore(); return 0; }
     switch(msg) {
     case WM_CREATE:
         app.window=w; app.dpi=(int)GetDpiForWindow(w); app.rich=LoadLibraryW(L"Msftedit.dll");
@@ -1176,8 +1282,12 @@ static LRESULT CALLBACK window_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
         app.workspace=child(w,L"COMBOBOX",L"",WS_TABSTOP|CBS_DROPDOWNLIST|WS_VSCROLL,IdWorkspace);  app.projectbutton=child(w,L"BUTTON",L"Workspaces...",WS_TABSTOP|BS_OWNERDRAW,IdProjects); app.summary=child(w,L"STATIC",L"",SS_ENDELLIPSIS,0);
         SendMessageW(app.explorerhead,WM_SETFONT,(WPARAM)app.heading,TRUE); SendMessageW(app.title,WM_SETFONT,(WPARAM)app.heading,TRUE); SendMessageW(app.monitorhead,WM_SETFONT,(WPARAM)app.heading,TRUE); SendMessageW(app.activitytitle,WM_SETFONT,(WPARAM)app.heading,TRUE);
         SetMenu(w,workbench_menu()); CheckMenuItem(GetMenu(w),IdMonitor,MF_BYCOMMAND|(app.show_monitor?MF_CHECKED:MF_UNCHECKED));
-        theme(); SetTimer(w,IdHeartbeat,20000,NULL); SetTimer(w,IdTimeout,1000,NULL); SetTimer(w,IdStats,5000,NULL); return 0;
-    case WM_SIZE: app.width=LOWORD(lp); app.height=HIWORD(lp); if(app.width&&app.height) layout(); return 0;
+        app.taskbar_created=RegisterWindowMessageW(L"TaskbarCreated"); theme(); SetTimer(w,IdCron,30000,NULL); SetTimer(w,IdHeartbeat,20000,NULL); SetTimer(w,IdTimeout,1000,NULL); SetTimer(w,IdStats,5000,NULL); return 0;
+    case SHELL_MESSAGE:
+        if(lp==WM_LBUTTONUP||lp==WM_LBUTTONDBLCLK) shell_restore();
+        else if(lp==NIN_BALLOONUSERCLICK) { Chat *c=findchat(app.notification_chat); shell_restore(); if(c) { app.current=c; c->unread=c->completed_unread=0; if(!c->loaded) resume(c); render(); sidebar(); } else if(app.notification_cron) show_scheduled(); }
+        else if(lp==WM_RBUTTONUP||lp==WM_CONTEXTMENU) { HMENU menu=CreatePopupMenu(); POINT p; GetCursorPos(&p); AppendMenuW(menu,MF_STRING,IdRestore,L"Open lcb-hermes"); AppendMenuW(menu,MF_STRING,IdExit,L"Exit"); SetForegroundWindow(w); TrackPopupMenu(menu,TPM_RIGHTBUTTON,p.x,p.y,0,w,NULL); DestroyMenu(menu); PostMessageW(w,WM_NULL,0,0); } return 0;
+    case WM_SIZE: if(wp==SIZE_MINIMIZED&&app.min_tray&&shell_add()) { ShowWindow(w,SW_HIDE); return 0; } app.width=LOWORD(lp); app.height=HIWORD(lp); if(app.width&&app.height) layout(); return 0;
     case WM_GETMINMAXINFO: ((MINMAXINFO *)lp)->ptMinTrackSize.x=px(620); ((MINMAXINFO *)lp)->ptMinTrackSize.y=px(450); return 0;
     case WM_DPICHANGED: {
         RECT *r=(RECT *)lp; app.dpi=LOWORD(wp); update_fonts(); SetWindowPos(w,NULL,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS); render(); return 0;
@@ -1191,6 +1301,12 @@ static LRESULT CALLBACK window_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_SETCURSOR: { POINT p; GetCursorPos(&p); ScreenToClient(w,&p); if(LOWORD(lp)==HTCLIENT && (app.dragging||(p.y>=px(50)&&p.y<app.height-px(30)&&abs(p.x-px(app.split_x))<=px(6)))) { SetCursor(LoadCursorW(NULL,IDC_SIZEWE)); return TRUE; } break; }
     case WM_COMMAND:
         switch(LOWORD(wp)) {
+        case IdRestore: shell_restore(); break;
+        case IdMinTray: app.min_tray=!app.min_tray; CheckMenuItem(GetMenu(w),IdMinTray,MF_BYCOMMAND|(app.min_tray?MF_CHECKED:MF_UNCHECKED)); if(app.min_tray) shell_add(); else if(!app.notifications) shell_remove(); schedule_save(); break;
+        case IdNotify: app.notifications=!app.notifications; CheckMenuItem(GetMenu(w),IdNotify,MF_BYCOMMAND|(app.notifications?MF_CHECKED:MF_UNCHECKED)); if(app.notifications) { shell_add(); poll_cron(); } else if(!app.min_tray) shell_remove(); schedule_save(); break;
+        case IdDashboard: show_admin(); break;
+        case IdTitleModel: if(app.connected&&!app.default_pending) { if(!app.modelwin&&!app.models_pending) app.server_model=2; models(); } break;
+        case IdServerModel: if(app.connected&&!app.default_pending) { if(!app.modelwin&&!app.models_pending) app.server_model=1; models(); } break;
         case IdNew: newchat(); break;
         case IdServer: server_menu(); break;
         case IdManageServers: show_server(); break;
@@ -1203,7 +1319,7 @@ static LRESULT CALLBACK window_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
         case IdExport: export_chat(); break;
         case IdAbout: show_about(w); break;
         case IdExit: PostMessageW(w,WM_CLOSE,0,0); break;
-        case IdModel: if(app.connected) models(); else notice("Connect before choosing a model."); break;
+        case IdModel: if(app.connected) { if(!app.modelwin&&!app.models_pending) app.server_model=0; models(); } else notice("Connect before choosing a model."); break;
         case IdSend: submit(); break;
         case IdAttach: attach(); break;
         case IdRequest: if(app.current&&cJSON_GetArraySize(app.current->requests)) request_dialog(); break;
@@ -1226,7 +1342,7 @@ static LRESULT CALLBACK window_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
     case WM_NOTIFY: {
         NMHDR *h=(NMHDR *)lp;
         if(h->hwndFrom==app.tree&&h->code==NM_CUSTOMDRAW) return tree_paint((NMTVCUSTOMDRAW *)lp);
-        if(h->hwndFrom==app.tree&&h->code==TVN_GETINFOTIPW) { NMTVGETINFOTIPW *tip=(NMTVGETINFOTIPW *)lp; Chat *c=(Chat *)tip->lParam; if(c) { wchar_t date[120],*title=wide(c->title),*source=wide(c->source); chat_date(c,1,date,120); swprintf(tip->pszText,tip->cchTextMax,L"%ls\r\n%ls%ls%ls",title?title:L"",date,*date&&source&&*source?L" / ":L"",source?source:L""); free(title); free(source); } return 0; }
+        if(h->hwndFrom==app.tree&&h->code==TVN_GETINFOTIPW) { NMTVGETINFOTIPW *tip=(NMTVGETINFOTIPW *)lp; Chat *c=(Chat *)tip->lParam; if(c) { wchar_t date[120],*title=wide(c->title),*source=wide(c->source); chat_date(c,1,date,120); swprintf(tip->pszText,tip->cchTextMax,L"%ls\r\n%ls%ls%ls\r\nServer folder: %hs",title?title:L"",date,*date&&source&&*source?L" / ":L"",source?source:L"",c->folder_known&&*c->folder?c->folder:*c->cwd?c->cwd:*app.server_cwd?app.server_cwd:"server default"); free(title); free(source); } return 0; }
         if(h->hwndFrom==app.tree && h->code==TVN_SELCHANGEDW && !app.treebusy) { Chat *c=(Chat *)((NMTREEVIEWW *)lp)->itemNew.lParam; if(c&&c!=app.current) { app.current=c; c->unread=c->completed_unread=0; app.notice[0]=0; if(*c->stored&&!c->loaded) resume(c); render(); sidebar(); schedule_save(); } }
         if(h->hwndFrom==app.tree && h->code==TVN_KEYDOWN && ((NMTVKEYDOWN *)lp)->wVKey==VK_DELETE) { TVITEMW item={0}; item.hItem=TreeView_GetSelection(app.tree); item.mask=TVIF_PARAM; if(TreeView_GetItem(app.tree,&item)&&item.lParam) PostMessageW(w,WM_COMMAND,IdDelete,0); }
         return 0;
@@ -1241,20 +1357,21 @@ static LRESULT CALLBACK window_proc(HWND w,UINT msg,WPARAM wp,LPARAM lp) {
     }
     case WM_TIMER:
         if(wp==IdRender) render(); else if(wp==IdSave) save(); else if(wp==IdHeartbeat&&app.connected) rpc("ping",params(),RpcPing,NULL);
-        else if(wp==IdStats) { if(app.monitor_visible||app.serverwin) poll_stats(); status_stats(); }
-        else if(wp==IdList) listchats();
+        else if(wp==IdStats) { if(IsWindowVisible(w)&&(app.monitor_visible||app.serverwin)) poll_stats(); if(IsWindowVisible(w)) { app.ponder++; status_stats(); controls(); } }
+        else if(wp==IdCron) poll_cron();
+        else if(wp==IdList) { listchats(); project_tree(); }
         else if(wp==IdTimeout) { Pending **link=&app.pending; ULONGLONG now=GetTickCount64(); while(*link) { Pending *p=*link; if(now-p->started>90000) { *link=p->next; result(p,NULL,"Server request timed out. The request was not retried."); free(p); } else link=&p->next; } } return 0;
     case WM_CTLCOLORSTATIC: case WM_CTLCOLOREDIT: case WM_CTLCOLORLISTBOX: return color_control(msg,wp,lp);
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: { PAINTSTRUCT paint; HDC dc=BeginPaint(w,&paint); paint_workbench(dc); EndPaint(w,&paint); return 0; }
     case WM_PRINTCLIENT: draw_workbench((HDC)wp); return 0;
-    case WM_CLOSE: save(); if(app.modelwin) DestroyWindow(app.modelwin); if(app.aboutwin) DestroyWindow(app.aboutwin); if(app.serverwin) DestroyWindow(app.serverwin); if(app.projectwin) DestroyWindow(app.projectwin); DestroyWindow(w); return 0;
-    case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_CLOSE: admin_close(); save(); if(app.modelwin) DestroyWindow(app.modelwin); if(app.aboutwin) DestroyWindow(app.aboutwin); if(app.serverwin) DestroyWindow(app.serverwin); if(app.projectwin) DestroyWindow(app.projectwin); DestroyWindow(w); return 0;
+    case WM_DESTROY: shell_remove(); PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(w,msg,wp,lp);
 }
 static int create_window(HINSTANCE instance,int show) {
-    WNDCLASSEXW wc={0}; INITCOMMONCONTROLSEX cc={sizeof(cc),ICC_TREEVIEW_CLASSES|ICC_LISTVIEW_CLASSES|ICC_PROGRESS_CLASS|ICC_STANDARD_CLASSES|ICC_LINK_CLASS}; HWND w;
+    WNDCLASSEXW wc={0}; INITCOMMONCONTROLSEX cc={sizeof(cc),ICC_TREEVIEW_CLASSES|ICC_LISTVIEW_CLASSES|ICC_PROGRESS_CLASS|ICC_STANDARD_CLASSES|ICC_LINK_CLASS|ICC_TAB_CLASSES}; HWND w;
     app.instance=instance; app.dpi=96; InitCommonControlsEx(&cc); CoInitializeEx(NULL,COINIT_APARTMENTTHREADED);
     wc.cbSize=sizeof(wc); wc.hInstance=instance; wc.hCursor=LoadCursorW(NULL,IDC_ARROW); wc.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(101)); wc.lpszClassName=L"LCBHermes"; wc.lpfnWndProc=window_proc; RegisterClassExW(&wc);
     wc.lpszClassName=L"LCBHermesServer"; wc.lpfnWndProc=server_proc; RegisterClassExW(&wc); wc.lpszClassName=L"LCBHermesQuestion"; wc.lpfnWndProc=question_proc; RegisterClassExW(&wc); wc.lpszClassName=L"LCBHermesProjects"; wc.lpfnWndProc=project_proc; RegisterClassExW(&wc);
@@ -1267,7 +1384,7 @@ static int create_window(HINSTANCE instance,int show) {
 static void cleanup(void) {
     MSG msg; Pending *p; net_free(app.net); while(PeekMessageW(&msg,app.window,NET_MESSAGE,NET_MESSAGE,PM_REMOVE)) { NetMessage *m=(NetMessage *)msg.lParam; if(m->tag==RestUpload) upload_done(m->context); cJSON_Delete(m->json); free(m); }
     while(app.upload_jobs) upload_done(app.upload_jobs);
-    while((p=app.pending)!=NULL) { app.pending=p->next; free(p); } clear_chats(); previews_clear(); cJSON_Delete(app.settings); cJSON_Delete(app.stats); cJSON_Delete(app.models); cJSON_Delete(app.projects); cJSON_Delete(app.project_tree);
+    while((p=app.pending)!=NULL) { app.pending=p->next; free(p); } clear_chats(); previews_clear(); cJSON_Delete(app.default_request); cJSON_Delete(app.settings); cJSON_Delete(app.stats); cJSON_Delete(app.models); cJSON_Delete(app.projects); cJSON_Delete(app.project_tree);
     free(app.view_rows); free(app.activity_text); if(app.nouslogo) DeleteObject(app.nouslogo); if(app.icons) ImageList_Destroy(app.icons); if(app.normal) DeleteObject(app.normal); if(app.fixed) DeleteObject(app.fixed); if(app.heading) DeleteObject(app.heading); if(app.brandfont) DeleteObject(app.brandfont); if(app.small) DeleteObject(app.small); if(app.face) DeleteObject(app.face); if(app.paper) DeleteObject(app.paper); if(app.rich) FreeLibrary(app.rich); CoUninitialize();
 }
 static void startup_connection(void) {
@@ -1279,12 +1396,14 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE previous,PWSTR command,int show
     if(!store_path(app.path,1024)) return 1; app.settings=store_read(app.path); if(!app.settings) { app.corrupt=1; app.settings=cJSON_CreateObject(); }
     app.sidebar_width=(int)number(app.settings,"sidebar_width"); if(app.sidebar_width<160||app.sidebar_width>10000) app.sidebar_width=240;
     app.show_monitor=!cJSON_HasObjectItem(app.settings,"monitor")||jb(app.settings,"monitor"); copytext(app.url,sizeof(app.url),js(app.settings,"active_url")); copytext(app.user,sizeof(app.user),js(app.settings,"active_user"));
-    if(!create_window(instance,show)) return 1;
+    app.min_tray=jb(app.settings,"minimize_to_tray"); app.notifications=!cJSON_HasObjectItem(app.settings,"notifications")||jb(app.settings,"notifications");
+    if(!create_window(instance,show)) return 1; if(app.min_tray||app.notifications) shell_add();
     profile_load(app.url,app.user); sidebar(); render(); if(app.corrupt) notice("Saved settings could not be read. They were preserved; reconnect without saving.");
     profiles=cJSON_GetObjectItemCaseSensitive(app.settings,"profiles"); cJSON_ArrayForEach(p,profiles) if(!strcmp(js(p,"url"),app.url)&&!strcmp(js(p,"user"),app.user)) { copytext(app.cookie,sizeof(app.cookie),js(p,"cookie")); break; }
     startup_connection();
     while(GetMessageW(&msg,NULL,0,0)>0) { if(app.aboutwin&&IsDialogMessageW(app.aboutwin,&msg)) continue;
         if(app.serverwin&&IsDialogMessageW(app.serverwin,&msg)) continue;
+        if(admin_window()&&IsDialogMessageW(admin_window(),&msg)) continue;
         if(app.modelwin&&IsDialogMessageW(app.modelwin,&msg)) continue;
         if(app.projectwin&&IsDialogMessageW(app.projectwin,&msg)) continue;
         if(msg.message==WM_KEYDOWN&&GetKeyState(VK_CONTROL)<0) { if(msg.wParam=='N') { newchat(); continue; } if(msg.wParam=='R') { SendMessageW(app.window,WM_COMMAND,IdReconnect,0); continue; } }
