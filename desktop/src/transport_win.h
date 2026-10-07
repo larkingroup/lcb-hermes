@@ -18,6 +18,8 @@ Net *net_new(HWND target);
 void net_connect(Net *net, const char *url, const char *user, const char *password, int private_http, const char *cookie);
 int net_send(Net *net, const cJSON *frame);
 void net_rest(Net *net, const char *path, int tag, void *context);
+int net_post(Net *net, const char *path, const cJSON *body, int tag, void *context);
+int net_write(Net *net, const char *method, const char *path, const cJSON *body, int tag, void *context);
 void net_upload(Net *net, const wchar_t *file, int tag, void *context);
 void net_free(Net *net);
 wchar_t *wide(const char *text);

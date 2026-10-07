@@ -27,4 +27,26 @@ Android 16 emulator. Hermes 0.21.5 on TrueNAS.
   server-menu return, image metadata after resume, deletion of its own test chat.
 - Android after folder move: unit tests, release lint, signed APK and AAB build passed.
 
-Desktop checks are kept locally outside the tracked source.
+Historical desktop checks are kept locally; current contract checks are tracked
+under `desktop/tests`.
+
+0.50-pre1 PC prerelease / 2026-10-07:
+
+- Nine passing suites: the seven local checks plus two tracked native contract suites.
+- Unfiled resume/fallback, loaded workspace changes, old-cache migration, cron
+  baseline/deduplication, tray restore/Explorer restart/exit, server-model scope.
+- Read-only 0.21.5 check: 26 chats, two tree groups, default model and cron endpoint.
+- Server-default writes and notifications use captured transports/Shell calls in
+  regression checks; no live model changes or real cron execution were performed.
+- Native settings checks cover credential payloads and clearing, endpoint edits,
+  device/PKCE flow handling, cancellation and late responses, panel generations,
+  targeted config patches, title-model scope, and container update gating.
+- Live authenticated reads confirm config, credential metadata, OAuth catalog,
+  custom endpoints and managed-runtime update status. No provider login or key was
+  changed. Actual provider authorization still needs an interactive account login.
+- Live targeted workaround: disable model title upgrades on 0.21.5 while preserving
+  instant titles. Readback confirms `model_upgrade_enabled: false`, `enabled: true`.
+  Chat model and reasoning settings were not changed.
+- One live test prompt: expected reply received, one title event, zero auxiliary
+  title warnings, explicit default folder and Chats grouping. Deletion of this
+  test's own conversation was confirmed; existing history was left alone.

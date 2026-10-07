@@ -1,7 +1,7 @@
 # Hermes integration notes
 
 Reviewed against the official Hermes source/docs and the existing 0.21.5 server on
-2026-10-05. The desktop stays on the authenticated JSON-RPC WebSocket contract it
+2026-10-07. The desktop stays on the authenticated JSON-RPC WebSocket contract it
 already uses. The REST session-chat SSE API is a separate surface.
 
 ## Session identity and history
@@ -56,7 +56,18 @@ The client does not set the server-wide active project merely because the local
 picker changes. Folder selection is remembered per server/login on this PC.
 
 New chats pass `cwd` to `session.create`; resumed chats use their existing
-`session_id` and receive authoritative `info.cwd` / `info.project` metadata.
+`session_id`. Resume `info.cwd` is the execution directory, which can be a fallback
+for a chat with no saved workspace. Its `info.project` must not refile the chat.
+Sidebar membership comes from `projects.tree`, including its `isNoProject` flag,
+and remains authoritative for loaded chats. Runtime and saved folder fields are
+stored separately. Old caches are reclassified from the server tree. Rows omitted
+from that tree keep unknown membership; absence does not establish membership.
+For display, no-folder/unknown chats and chats in `terminal.cwd` share **Chats**.
+`source: cron` goes in **Scheduled runs**, since upstream excludes cron from its
+project tree. Other folders use the project name or path basename; full paths are
+in tooltips. This grouping changes no saved chat metadata. `GET /api/config` reads
+the default folder; new default chats pass it explicitly as their `cwd`.
+Tree refreshes follow `sessions.changed` and are coalesced to one request in flight.
 If a create result reports a different folder, the draft is retained and the
 prompt is withheld so the user can review it before sending. Unsupported project
 methods disable the workspace controls without disabling chat.
@@ -75,7 +86,9 @@ The activity history is bounded to 40 entries per chat and is transient.
 
 The client does not synthesize model reasoning or request verbose reasoning.
 The TUI's rotating words such as pondering are presentation strings from its
-`VERBS` list; they are not announcements from the model.
+`VERBS` list; they are not announcements from the model. The desktop cycles a
+small set of these only for generic working/thinking states. Actual tool and
+server status text takes precedence; the transcript and activity log stay factual.
 
 `message.interim` contains actual assistant commentary. If `already_streamed` is
 false, the text is appended to the transcript; otherwise the existing streamed
@@ -99,7 +112,49 @@ with a session ID reads the chat's effort. OpenAI/Codex levels follow upstream
 `agent/reasoning_effort.py`; model generations differ in their supported levels.
 
 The server default is separate: the dashboard's `POST /api/model/set`, `scope: main`,
-writes its configured model for new sessions. The chat picker does not change it.
+writes its configured model for new sessions. Server > Default model on server
+uses this endpoint and honors its model-warning confirmation. It leaves reasoning
+settings unspecified and refreshes the default after an acknowledged save. The
+chat picker does not change it. Failed/uncertain writes are never auto-retried.
+The monitor contains host/version and resource readings, without the default model.
+
+## Headless server settings
+
+The native settings panel uses the authenticated dashboard REST endpoints, which
+are available on the audited headless 0.21.5 server. It does not require the web UI.
+
+- `GET /api/env` supplies variable metadata; `PUT /api/env` saves one new key with
+  `provider_setup: true`. Secret input and serialized request buffers are cleared;
+  provider credentials are not copied into desktop settings.
+- `GET /api/providers/oauth` advertises providers and flows. The panel calls
+  `POST /api/providers/oauth/{provider}/start`, polls its session, and waits for
+  `status: approved`. It opens the provider's HTTPS consent URL on this PC. PKCE
+  code submission is enabled only when advertised. External flows show the server
+  CLI command. Cancel/close deletes the session, including a late start response.
+- `GET/POST /api/providers/custom-endpoints` lists and saves endpoints. Saving
+  preserves a blank existing key and uses `make_default: false`; model selection
+  is separate. The panel supports the advertised OpenAI/Responses/Anthropic modes.
+- `config.set`, key `terminal.cwd`, validates and saves an existing server folder.
+  Existing chats and files are not moved.
+- `PUT /api/config` patches only `auxiliary.title_generation.model_upgrade_enabled`.
+  The title-model picker uses `/api/model/set`, `scope: auxiliary`,
+  `task: title_generation`.
+- `/api/hermes/update/check` gates updating with `can_apply` and `update_available`.
+  Supported installs use `/api/hermes/update` and its returned action status.
+  The audited container reports `managed-runtime` and cannot update in-app.
+
+Responses are scoped to server, login and panel generation; writes are not retried.
+OAuth polling obeys a bounded server interval and expires. Unsupported operations
+remain unavailable. This is focused configuration support, not the full dashboard.
+
+### 0.21.5 title warning
+
+The `v2026.9.24` release's title generator requests disabled reasoning, while its
+Codex effort table does not recognize `gpt-6.1-sol`; the fallback accepts `none`,
+which the model rejects. The chat's own reasoning setting does not fix that
+separate request. Turning off model title upgrades preserves instant first-message
+titles. This targeted setting was applied and read back on the user's server;
+automatic titles remain enabled and the chat model was not changed.
 
 Saved servers and cookies share the existing Windows DPAPI store. Names and
 login identity select a server; each server/login retains its own drafts. Removing
@@ -110,6 +165,32 @@ Authenticated `GET /api/system/stats` supplies the monitor. It is polled every
 five seconds while the monitor is visible, with one stats
 request in flight. Readings describe the server host; offline state replaces
 the live figures. Responses are scoped to their originating server URL.
+
+## Tray and cron
+
+Tray support uses Win32 `Shell_NotifyIconW`. Minimize-to-tray is optional, closing
+still exits, and the icon is restored after Explorer restarts. A failed icon add
+leaves/restores the window so the app cannot become inaccessible. Hiding the window
+keeps the WebSocket and lightweight cron poll alive but stops host-stat polling.
+
+Reply and approval notifications use actual session events. Clicking a reply opens
+its chat. Unknown-session requests get an error instead of being assigned to the
+selected chat. Cron uses authenticated `GET /api/cron/jobs` every 30 seconds with
+one request in flight. Its `last_run_at` and `last_status` form a per-job/profile
+completion watermark, retained per saved server/login. The initial snapshot is
+silent; repeated snapshots do not notify or rewrite settings. Changed results in
+one poll become one notification opening the native Scheduled runs group. It reports the latest job
+state, not a guaranteed ledger of every run between polls. Jobs removed before a
+poll cannot be reported. Unavailable cron support is surfaced without disabling
+chat, and disconnecting while hidden produces a reconnect notification.
+
+## Interface scope
+
+Nous maintains Hermes Desktop, the TUI and the web dashboard in the official
+repository. lcb-hermes is an independent native C client of those backend contracts.
+This pass covers chat/workspace identity, events, tray delivery, model selection
+and the focused native server settings above. Cron editing, profiles, workspace
+moves, skills and the rest of the administrative UI remain future work.
 
 ## Upstream references
 
@@ -123,4 +204,11 @@ the live figures. Responses are scoped to their originating server URL.
 - [Prompt and attachment RPCs](https://github.com/NousResearch/hermes-agent/blob/main/tui_gateway/methods_prompt.py)
 - [Gateway reasoning callbacks](https://github.com/NousResearch/hermes-agent/blob/main/tui_gateway/agent_callbacks.py)
 - [TUI activity words](https://github.com/NousResearch/hermes-agent/blob/main/ui-tui/src/content/verbs.ts)
+- [Official Hermes Desktop](https://hermes-agent.nousresearch.com/docs/user-guide/desktop/)
+- [Cron dashboard contract](https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/web_routers/cron.py)
+- [Server model assignment](https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/web_routers/models.py)
+- [Provider OAuth contracts](https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/web_routers/oauth.py)
+- [Configuration and credentials](https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/web_routers/config_env.py)
+- [0.21.5 title generator](https://github.com/NousResearch/hermes-agent/blob/v2026.9.24/agent/title_generator.py)
+- [0.21.5 effort table](https://github.com/NousResearch/hermes-agent/blob/v2026.9.24/agent/reasoning_effort.py)
 - [REST/SSE API server](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/api-server.md)

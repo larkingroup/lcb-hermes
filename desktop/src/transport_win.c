@@ -14,6 +14,7 @@
 
 typedef struct Job {
     int kind, tag, allow;
+    wchar_t method[8];
     char *url, *user, *password, *cookie, *path, *wire;
     wchar_t *file;
     void *context;
@@ -134,9 +135,9 @@ static HINTERNET open_request(Net *n,const wchar_t *verb,const wchar_t *path,con
 failed:
     winerror(error,cap,GetLastError()); close_request(n,req); free(origin); free(cookie); return NULL;
 }
-static cJSON *http(Net *n,const char *path,const void *body,DWORD size,const wchar_t *type,char *error,size_t cap) {
+static cJSON *http_method(Net *n,const wchar_t *method,const char *path,const void *body,DWORD size,const wchar_t *type,char *error,size_t cap) {
     wchar_t *wp=wide(path); HINTERNET req; DWORD status=0, got; char chunk[16384], *wire=malloc(1); size_t used=0; cJSON *json=NULL;
-    req=open_request(n,body?L"POST":L"GET",wp,type,0,body,size,error,cap,&status); free(wp);
+    req=open_request(n,method,wp,type,0,body,size,error,cap,&status); free(wp);
     if(!req) { free(wire); return NULL; }
     if(wire) wire[0]=0;
     while(wire && WinHttpReadData(req,chunk,sizeof(chunk),&got) && got) {
@@ -146,8 +147,9 @@ static cJSON *http(Net *n,const char *path,const void *body,DWORD size,const wch
     if(status>=200 && status<300 && wire) json=cJSON_ParseWithLength(wire,used);
     if(!json) { if(status==401||status==403) snprintf(error,cap,"Sign in again. Check your server login.");
         else if(!*error) snprintf(error,cap,"Server request failed (HTTP %lu).",(unsigned long)status); }
-    free(wire); close_request(n,req); return json;
+    if(wire) SecureZeroMemory(wire,used); free(wire); close_request(n,req); return json;
 }
+static cJSON *http(Net *n,const char *path,const void *body,DWORD size,const wchar_t *type,char *error,size_t cap) { return http_method(n,body?L"POST":L"GET",path,body,size,type,error,cap); }
 static void received(void *context,cJSON *frame) { NetMessage *m=message(NetFrame); if(!m) { cJSON_Delete(frame); return; } m->json=frame; deliver(context,m); }
 static DWORD WINAPI receive_loop(void *context) {
     Net *n=context; char chunk[16384], *wire=malloc(1); size_t used=0; DWORD got, code; WINHTTP_WEB_SOCKET_BUFFER_TYPE type;
@@ -199,7 +201,7 @@ done:
     close_request(n,req); if(login) { cJSON *password=cJSON_GetObjectItemCaseSensitive(login,"password"); if(cJSON_IsString(password)) SecureZeroMemory(password->valuestring,strlen(password->valuestring)); } cJSON_Delete(login); cJSON_Delete(reply); cJSON_Delete(ticket);
     if(!n->socket||!n->reader) { disconnect(n); failure(n,*error?error:"Could not connect to Hermes."); }
 }
-static void freejob(Job *j) { if(!j) return; if(j->password) SecureZeroMemory(j->password,strlen(j->password)); free(j->url); free(j->user); free(j->password); free(j->cookie); free(j->path); free(j->wire); free(j->file); free(j); }
+static void freejob(Job *j) { if(!j) return; if(j->password) SecureZeroMemory(j->password,strlen(j->password)); if(j->wire) SecureZeroMemory(j->wire,strlen(j->wire)); free(j->url); free(j->user); free(j->password); free(j->cookie); free(j->path); free(j->wire); free(j->file); free(j); }
 static void upload(Net *n,Job *j,NetMessage *m) {
     HANDLE file=CreateFileW(j->file,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,NULL); LARGE_INTEGER length; DWORD got; char *data, *name; const wchar_t *base=wcsrchr(j->file,L'\\'); size_t prefix, total;
     char boundary[80], ending[110], header[4096]; GUID guid; cJSON *files; const char *root;
@@ -223,9 +225,10 @@ static DWORD WINAPI worker(void *context) {
         if(!j) continue;
         if(j->kind==1) connect_job(n,j);
         else if(j->kind==2) { if(!n->socket || WinHttpWebSocketSend(n->socket,WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,j->wire,(DWORD)strlen(j->wire))) failure(n,"Message could not be sent. It was not retried."); }
-        else { NetMessage *m=message(NetRest); if(m) { m->tag=j->tag; m->context=j->context; snprintf(m->url,sizeof(m->url),"%s",n->url);
+        else { NetMessage *m=message(NetRest); if(m) { m->tag=j->tag; m->context=j->context; snprintf(m->url,sizeof(m->url),"%s",n->url); snprintf(m->user,sizeof(m->user),"%s",n->user);
             if(!n->connection) snprintf(m->error,sizeof(m->error),"Connect first.");
             else if(j->kind==4) upload(n,j,m);
+            else if(j->kind==5) m->json=http_method(n,j->method,j->path,j->wire,(DWORD)strlen(j->wire),L"application/json",m->error,sizeof(m->error));
             else m->json=http(n,j->path,NULL,0,NULL,m->error,sizeof(m->error)); deliver(n,m);
         } }
         freejob(j);
@@ -237,5 +240,7 @@ Net *net_new(HWND target) { Net *n=calloc(1,sizeof(*n)); if(!n) return NULL; n->
 void net_connect(Net *n,const char *url,const char *user,const char *password,int allow,const char *cookie) { Job *j=calloc(1,sizeof(*j)); if(!j) return; j->kind=1; j->allow=allow; j->url=textdup(url); j->user=textdup(user); j->password=textdup(password); j->cookie=textdup(cookie); queue(n,j); }
 int net_send(Net *n,const cJSON *frame) { Job *j=calloc(1,sizeof(*j)); if(!j) return 0; j->kind=2; j->wire=cJSON_PrintUnformatted(frame); if(!j->wire) { free(j); return 0; } queue(n,j); return 1; }
 void net_rest(Net *n,const char *path,int tag,void *ctx) { Job *j=calloc(1,sizeof(*j)); if(!j) return; j->kind=3; j->path=textdup(path); j->tag=tag; j->context=ctx; queue(n,j); }
+int net_write(Net *n,const char *method,const char *path,const cJSON *body,int tag,void *ctx) { Job *j; if(strcmp(method,"PUT")&&strcmp(method,"POST")&&strcmp(method,"DELETE")) return 0; j=calloc(1,sizeof(*j)); if(!j) return 0; j->kind=5; swprintf(j->method,8,L"%hs",method); j->path=textdup(path); j->wire=body?cJSON_PrintUnformatted(body):textdup("{}"); j->tag=tag; j->context=ctx; if(!j->path||!j->wire) { freejob(j); return 0; } queue(n,j); return 1; }
+int net_post(Net *n,const char *path,const cJSON *body,int tag,void *ctx) { return net_write(n,"POST",path,body,tag,ctx); }
 void net_upload(Net *n,const wchar_t *path,int tag,void *ctx) { Job *j=calloc(1,sizeof(*j)); size_t size=(wcslen(path)+1)*sizeof(wchar_t); if(!j) return; j->kind=4; j->file=malloc(size); if(j->file) memcpy(j->file,path,size); j->tag=tag; j->context=ctx; queue(n,j); }
 void net_free(Net *n) { Job *j; if(!n) return; SetEvent(n->stop); EnterCriticalSection(&n->lock); if(n->request) { WinHttpCloseHandle(n->request); n->request=NULL; } LeaveCriticalSection(&n->lock); WaitForSingleObject(n->thread,INFINITE); CloseHandle(n->thread); while((j=n->first)!=NULL) { n->first=j->next; freejob(j); } CloseHandle(n->work); CloseHandle(n->stop); DeleteCriticalSection(&n->lock); SecureZeroMemory(n,sizeof(*n)); free(n); }
