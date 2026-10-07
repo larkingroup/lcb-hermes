@@ -2,23 +2,27 @@
 
 Small native clients for Hermes. No ads. No purchases.
 
-<img src="branding/phone.png" width="220" alt="lcb-hermes chats">
-<img src="branding/fold.png" width="400" alt="lcb-hermes on a wide screen">
+- **Desktop [0.50-pre1](https://github.com/larkingroup/lcb-hermes/releases/tag/v0.50-pre1)** — C / Win32, Windows 10+ x64. One portable EXE.
+- **Android [0.4.7](https://github.com/larkingroup/lcb-hermes/releases/tag/v0.4.7)** — native Java, Android 8+.
 
-Connect with your Hermes server URL and login. Models and tools stay on the server.
-Use your configured address, such as `https://server:port`.
-Private HTTP needs the checkbox. First installs open the server setup window.
+Connect to your Hermes server with its URL and login. Models and tools stay on
+the server. Chats, separate drafts, attachments, model choices, and Hermes activity
+sit in a classic beige workbench.
 
-Chats in a sidebar: tucked away on phones, beside the conversation on wider screens.
-Separate drafts and image previews. Tasks keep going when you switch chats.
-The computer icon chooses saved servers and opens the server monitor or manager.
-Both clients use the classic beige workbench, with server workspaces, a searchable
-model and effort picker, dated chat history, and compact Hermes activity.
-Background replies move up and stay blue until opened. Draft attachments appear
-above the composer; export lives in the Chat menu.
+Desktop adds tray notifications and native server settings for provider accounts,
+API keys, and custom endpoints. A running Hermes server is required.
 
-- [Android](android/): native Java, Android 8+.
-- [PC](desktop/): C / Win32, Windows 10+ x64; portable EXE, based on lcb-ai.
-- [iOS](ios/): later.
+**Desktop · 0.50-pre1**
 
-Tested against Hermes 0.21.5. [Downloads](https://github.com/larkingroup/lcb-hermes/releases).
+<img src="branding/pc-workbench.png" width="820" alt="Desktop 0.50-pre1 with Chats, Scheduled runs, conversation, and server monitor">
+
+**Android · 0.4.7**
+
+<img src="branding/phone.png" width="220" alt="Android 0.4.7 on a phone">
+<img src="branding/fold.png" width="520" alt="Android 0.4.7 wide-screen workbench">
+
+Screenshots use example conversations. [Desktop details](desktop/) ·
+[Android details](android/) · [Downloads](https://github.com/larkingroup/lcb-hermes/releases)
+
+Hermes Agent is made by [Nous Research and the Hermes team](https://github.com/NousResearch/hermes-agent).
+lcb-hermes is an independent client. Tested against Hermes 0.21.5.
