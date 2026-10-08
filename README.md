@@ -3,6 +3,7 @@
 Small native clients for Hermes. No ads. No purchases.
 
 - **Desktop [0.50-pre1](https://github.com/larkingroup/lcb-hermes/releases/tag/v0.50-pre1)** — C / Win32, Windows 10+ x64. One portable EXE.
+- **Linux (experimental)** — C / Xt / Athena, classic beige workbench. [Build and Wine fallback](linux/README.md).
 - **Android [0.4.7](https://github.com/larkingroup/lcb-hermes/releases/tag/v0.4.7)** — native Java, Android 8+.
 
 Connect to your Hermes server with its URL and login. Models and tools stay on

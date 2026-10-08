@@ -13,3 +13,5 @@ test-access.json
 android/scripts/probe-hermes.py
 android/scripts/refine.py
 android/scripts/collect-notices.py
+
+**/__pycache__/
