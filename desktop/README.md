@@ -1,6 +1,9 @@
 # pc
 
 Native C / Win32. Windows 10+ x64. One portable EXE.
+
+An experimental small C / Xt / Athena client is also available for Linux, with
+the same beige palette. [Linux build, scope, and Wine fallback](../linux/README.md).
 Classic controls and embedded icons adapted from [lcb-ai](https://github.com/larkingroup/lcb-ai).
 
 ![PC workbench with example data](../branding/pc-workbench.png)

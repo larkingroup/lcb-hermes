@@ -65,7 +65,10 @@ void chat_load(Chat *c, const cJSON *r) {
         cJSON_ArrayForEach(a,c->attachments) cJSON_DeleteItemFromObjectCaseSensitive(a,"queued");
     }
     field(c->id,sizeof(c->id),js(r,"session_id"));
-    if(!*stored) stored=js(r,"stored_session_id"); if(!*stored) stored=js(r,"session_key"); if(!*stored && *c->stored) stored=c->stored; if(!*stored) stored=c->id;
+    if(!*stored) stored=js(r,"stored_session_id");
+    if(!*stored) stored=js(r,"session_key");
+    if(!*stored && *c->stored) stored=c->stored;
+    if(!*stored) stored=c->id;
     if(stored!=c->stored) field(c->stored,sizeof(c->stored),stored);
     if(*js(info,"title")) field(c->title,sizeof(c->title),js(info,"title"));
     field(c->model,sizeof(c->model),js(info,"model"));
@@ -94,7 +97,8 @@ int chat_event(Chat *c, const cJSON *e) {
     if(!strcmp(type,"message.start")) { c->running=1; c->stream=-1; activity(c,"Working"); }
     else if(!strcmp(type,"message.delta")) {
         cJSON *m=stream(c); const char *old=js(m,"text"), *delta=js(p,"text"); size_t a=strlen(old), b=strlen(delta); char *joined;
-        if(a+b>WIRE_LIMIT) return 0; joined=malloc(a+b+1); if(!joined) return 0;
+        if(a+b>WIRE_LIMIT) return 0;
+        joined=malloc(a+b+1); if(!joined) return 0;
         memcpy(joined,old,a); memcpy(joined+a,delta,b+1); cJSON_ReplaceItemInObjectCaseSensitive(m,"text",cJSON_CreateString(joined)); free(joined);
         activity(c,"Responding");
     } else if(!strcmp(type,"message.complete")) {
